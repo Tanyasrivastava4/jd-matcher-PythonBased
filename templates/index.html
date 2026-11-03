@@ -1,0 +1,972 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>ATS Matcher AI - Job Description to Resume Matching</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+  <style>
+    @import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&display=swap');
+    body { font-family: 'Inter', sans-serif; }
+    .badge-matched { background-color: #dcfce7; color: #15803d; border: 1px solid #bbf7d0; }
+    .badge-other { background-color: #f1f5f9; color: #475569; border: 1px solid #e2e8f0; }
+    .toast {
+      visibility: hidden;
+      min-width: 250px;
+      margin-left: -125px;
+      background-color: #1e293b;
+      color: #fff;
+      text-align: center;
+      border-radius: 8px;
+      padding: 12px 16px;
+      position: fixed;
+      z-index: 100;
+      left: 50%;
+      bottom: 30px;
+      font-size: 14px;
+      box-shadow: 0 10px 15px -3px rgba(0, 0, 0, 0.2);
+    }
+    .toast.show {
+      visibility: visible;
+      animation: fadein 0.4s, fadeout 0.4s 2.5s;
+    }
+    @keyframes fadein { from { bottom: 0; opacity: 0; } to { bottom: 30px; opacity: 1; } }
+    @keyframes fadeout { from { bottom: 30px; opacity: 1; } to { bottom: 0; opacity: 0; } }
+  </style>
+</head>
+<body class="bg-slate-50 text-slate-900 min-h-screen flex flex-col">
+
+  <!-- TOP NAVIGATION -->
+  <header class="bg-white border-b border-slate-200 sticky top-0 z-40 shadow-sm">
+    <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 h-16 flex items-center justify-between">
+      <div class="flex items-center space-x-3">
+        <div class="w-10 h-10 rounded-xl bg-gradient-to-tr from-indigo-600 to-violet-600 flex items-center justify-center text-white font-bold text-xl shadow-md shadow-indigo-100">
+          <i class="fa-solid fa-briefcase"></i>
+        </div>
+        <div>
+          <h1 class="font-extrabold text-lg text-slate-900 tracking-tight flex items-center gap-2">
+            ATS Matcher AI
+            <span class="text-xs font-semibold px-2 py-0.5 rounded-full bg-indigo-50 text-indigo-700 border border-indigo-200">v2.0</span>
+          </h1>
+          <p class="text-xs text-slate-500 font-medium">FastAPI &bull; Qdrant Vector DB &bull; FastEmbed CPU (ONNX)</p>
+        </div>
+      </div>
+
+      <!-- SYSTEM STATUS -->
+      <div class="flex items-center space-x-3 text-xs">
+        <button onclick="openUploadModal()" class="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-indigo-600 hover:bg-indigo-700 text-white font-semibold transition shadow-xs cursor-pointer">
+          <i class="fa-solid fa-cloud-arrow-up"></i> + Add Resumes
+        </button>
+        <div class="bg-emerald-50 border border-emerald-200 text-emerald-700 font-semibold px-3 py-1.5 rounded-lg flex items-center gap-2 shadow-xs">
+          <span class="w-2 h-2 rounded-full bg-emerald-500 animate-pulse"></span>
+          <span id="telemetryStatus">593 Resumes Indexed</span>
+        </div>
+        <a href="http://localhost:6333/dashboard#/collections/resumes" target="_blank" class="hidden sm:inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-slate-100 hover:bg-slate-200 text-slate-700 font-medium transition">
+          <i class="fa-solid fa-database text-indigo-500"></i> Qdrant Dashboard
+        </a>
+      </div>
+    </div>
+  </header>
+
+  <!-- MAIN CONTAINER -->
+  <main class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8 flex-1 w-full grid grid-cols-1 lg:grid-cols-12 gap-8">
+
+    <!-- LEFT COLUMN: JD INPUT & CONTROLS (5 cols on lg) -->
+    <div class="lg:col-span-5 space-y-6">
+      
+      <!-- INPUT PANEL CARD -->
+      <div class="bg-white rounded-2xl border border-slate-200 shadow-sm p-6 space-y-5">
+        <div>
+          <h2 class="text-base font-bold text-slate-900 flex items-center gap-2">
+            <i class="fa-solid fa-file-invoice text-indigo-600"></i>
+            Job Description (JD)
+          </h2>
+          <p class="text-xs text-slate-500 mt-1">Provide requirements to match against all <span id="candidateCountSubtitle">593</span> parsed candidate profiles.</p>
+        </div>
+
+        <!-- TABS: TEXT OR FILE UPLOAD -->
+        <div class="flex p-1 bg-slate-100 rounded-xl text-xs font-semibold text-slate-600">
+          <button id="tabTextBtn" onclick="switchTab('text')" class="flex-1 py-2 rounded-lg bg-white text-indigo-700 shadow-xs transition flex items-center justify-center gap-1.5">
+            <i class="fa-solid fa-align-left"></i> Paste JD Text
+          </button>
+          <button id="tabFileBtn" onclick="switchTab('file')" class="flex-1 py-2 rounded-lg hover:text-slate-900 transition flex items-center justify-center gap-1.5">
+            <i class="fa-solid fa-cloud-arrow-up"></i> Upload File
+          </button>
+        </div>
+
+        <!-- TAB CONTENT: PASTE TEXT -->
+        <div id="textTabContent" class="space-y-3">
+          <textarea id="jdTextInput" rows="8" class="w-full text-xs sm:text-sm p-3.5 border border-slate-300 rounded-xl focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 outline-none transition placeholder:text-slate-400 font-mono leading-relaxed resize-y" placeholder="Paste full Job Description here...
+Example:
+We are looking for a Senior Python Developer / Data Scientist with 3+ years experience in Machine Learning, FastAPI, Docker, and Qdrant vector databases..."></textarea>
+          
+          <!-- QUICK PRESETS -->
+          <div class="flex flex-wrap items-center gap-1.5 text-xs">
+            <span class="text-slate-400 font-medium">Quick Presets:</span>
+            <button onclick="setPreset('ds')" class="px-2.5 py-1 rounded-md bg-slate-100 hover:bg-slate-200 text-slate-700 transition font-medium">Data Scientist</button>
+            <button onclick="setPreset('cloud')" class="px-2.5 py-1 rounded-md bg-slate-100 hover:bg-slate-200 text-slate-700 transition font-medium">AWS / DevOps</button>
+            <button onclick="setPreset('fullstack')" class="px-2.5 py-1 rounded-md bg-slate-100 hover:bg-slate-200 text-slate-700 transition font-medium">Full Stack</button>
+            <button onclick="setPreset('hr')" class="px-2.5 py-1 rounded-md bg-slate-100 hover:bg-slate-200 text-slate-700 transition font-medium">HR Manager</button>
+          </div>
+        </div>
+
+        <!-- TAB CONTENT: FILE UPLOAD -->
+        <div id="fileTabContent" class="hidden space-y-3">
+          <div id="dropZone" class="border-2 border-dashed border-slate-300 hover:border-indigo-500 rounded-xl p-8 text-center cursor-pointer transition bg-slate-50 hover:bg-indigo-50/20">
+            <i class="fa-solid fa-file-arrow-up text-3xl text-slate-400 mb-2"></i>
+            <p class="text-sm font-medium text-slate-700">Drag & drop JD file or <span class="text-indigo-600 underline font-semibold">browse</span></p>
+            <p class="text-xs text-slate-400 mt-1">Supports Digital/Scanned PDF, Images (PNG, JPG), DOCX, TXT</p>
+            <input type="file" id="jdFileInput" class="hidden" accept=".pdf,.docx,.doc,.txt,.md,.png,.jpg,.jpeg,.jfif,.webp">
+          </div>
+          <div id="selectedFileInfo" class="hidden p-3 bg-indigo-50 border border-indigo-200 rounded-lg flex items-center justify-between text-xs text-indigo-900 font-medium">
+            <div class="flex items-center gap-2 truncate">
+              <i class="fa-solid fa-file-lines text-indigo-600 text-base shrink-0"></i>
+              <span id="selectedFileName" class="truncate max-w-[180px] font-bold"></span>
+            </div>
+            <div class="flex items-center gap-2">
+              <button type="button" onclick="previewUploadedJdText()" id="previewJdBtn" class="px-2.5 py-1 rounded-md bg-indigo-600 hover:bg-indigo-700 text-white font-semibold flex items-center gap-1 transition shadow-xs">
+                <i class="fa-solid fa-eye text-[10px]"></i> Inspect Text
+              </button>
+              <button type="button" onclick="clearSelectedFile()" class="text-rose-500 hover:text-rose-700 font-bold ml-1">Remove</button>
+            </div>
+          </div>
+        </div>
+
+        <!-- FILTER CONTROLS -->
+        <div class="border-t border-slate-100 pt-5 space-y-4">
+          <h3 class="text-xs font-bold uppercase tracking-wider text-slate-400">Search Filters</h3>
+
+          <!-- EXPERIENCE FILTER (TEXT INPUT & AUTO-DETECT) -->
+          <div>
+            <div class="flex items-center justify-between text-xs font-semibold text-slate-700 mb-1.5">
+              <label for="expTextInput" class="flex items-center gap-1.5">
+                <i class="fa-solid fa-business-time text-indigo-600"></i>
+                Experience Requirement:
+              </label>
+              <span class="text-[11px] text-slate-400 font-normal">Auto-detects from JD if blank</span>
+            </div>
+            <input type="text" id="expTextInput" placeholder="e.g. 0-1, 2+, 5-10yr, 3 yrs, freshers..." class="w-full py-2.5 px-3 text-xs sm:text-sm border border-slate-300 rounded-xl bg-white outline-none focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 transition font-medium text-slate-800 placeholder:text-slate-400">
+            <div class="flex items-center gap-1.5 mt-2 text-[11px] text-slate-500">
+              <span class="text-slate-400 font-medium">Quick set:</span>
+              <button type="button" onclick="setExpTag('0-1')" class="px-2 py-0.5 rounded bg-slate-100 hover:bg-slate-200 text-slate-700 font-medium transition">0-1 yr (Fresher)</button>
+              <button type="button" onclick="setExpTag('2+')" class="px-2 py-0.5 rounded bg-slate-100 hover:bg-slate-200 text-slate-700 font-medium transition">2+ yrs</button>
+              <button type="button" onclick="setExpTag('5-10yr')" class="px-2 py-0.5 rounded bg-slate-100 hover:bg-slate-200 text-slate-700 font-medium transition">5-10 yrs</button>
+              <button type="button" onclick="setExpTag('')" class="px-2 py-0.5 rounded bg-slate-100 hover:bg-slate-200 text-indigo-600 font-semibold transition" title="Auto-detect from JD">Auto (JD)</button>
+            </div>
+          </div>
+
+          <!-- TOP K RESULTS -->
+          <div class="grid grid-cols-2 gap-3 text-xs">
+            <div>
+              <label class="block font-semibold text-slate-700 mb-1">Results Limit:</label>
+              <select id="limitSelect" class="w-full p-2 border border-slate-300 rounded-lg bg-white outline-none focus:ring-2 focus:ring-indigo-500 font-medium">
+                <option value="5">Top 5 matches</option>
+                <option value="10" selected>Top 10 matches</option>
+                <option value="20">Top 20 matches</option>
+                <option value="50">Top 50 matches</option>
+              </select>
+            </div>
+            <div>
+              <label class="block font-semibold text-slate-700 mb-1">Must-Have Skill (Optional):</label>
+              <input type="text" id="mandatorySkillInput" placeholder="e.g. Python, AWS, SAP" class="w-full p-2 border border-slate-300 rounded-lg bg-white outline-none focus:ring-2 focus:ring-indigo-500 text-xs">
+            </div>
+          </div>
+
+          <!-- TWO-STAGE CROSS-ENCODER RE-RANKING -->
+          <div class="flex items-center justify-between text-xs pt-2 border-t border-slate-100">
+            <div>
+              <span class="font-semibold text-slate-800 flex items-center gap-1.5">
+                <i class="fa-solid fa-layer-group text-indigo-600"></i>
+                Two-Stage Re-ranking
+              </span>
+              <p class="text-[11px] text-slate-400 mt-0.5">Stage 1 Qdrant Vector + Stage 2 FlashRank Cross-Encoder</p>
+            </div>
+            <label class="relative inline-flex items-center cursor-pointer shrink-0 ml-2">
+              <input type="checkbox" id="enableRerankToggle" checked class="sr-only peer">
+              <div class="w-9 h-5 bg-slate-200 peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-slate-300 after:border after:rounded-full after:h-4 after:w-4 after:transition-all peer-checked:bg-indigo-600"></div>
+            </label>
+          </div>
+        </div>
+
+        <!-- MATCH BUTTON -->
+        <button id="matchBtn" onclick="executeMatch()" class="w-full py-3.5 px-4 rounded-xl bg-indigo-600 hover:bg-indigo-700 active:bg-indigo-800 text-white font-bold text-sm shadow-md shadow-indigo-200 transition flex items-center justify-center gap-2">
+          <i class="fa-solid fa-magnifying-glass"></i>
+          <span>Match Candidates</span>
+        </button>
+      </div>
+
+    </div>
+
+    <!-- RIGHT COLUMN: RESULTS & CANDIDATE SHOWCASE (7 cols on lg) -->
+    <div class="lg:col-span-7 space-y-6">
+
+      <!-- RESULTS HEADER / TELEMETRY BANNER -->
+      <div id="resultsBanner" class="hidden bg-white border border-slate-200 rounded-2xl p-4 shadow-sm flex flex-wrap items-center justify-between gap-3 text-xs">
+        <div class="flex items-center gap-3">
+          <div class="w-8 h-8 rounded-lg bg-emerald-100 text-emerald-700 flex items-center justify-center font-bold text-sm shrink-0">
+            <i class="fa-solid fa-check"></i>
+          </div>
+          <div>
+            <div class="flex items-center gap-2 flex-wrap">
+              <span id="resultCountText" class="font-bold text-slate-900 text-sm">Found 10 Matching Resumes</span>
+              <span id="expBadge" class="hidden px-2.5 py-0.5 rounded-full text-[11px] font-bold border"></span>
+            </div>
+            <div id="resultTimingText" class="text-slate-500 mt-0.5">Query processed in 28ms (Embedding: 11ms, Search: 5ms)</div>
+          </div>
+        </div>
+        <div class="flex items-center gap-2">
+          <button id="inspectJdBtn" onclick="inspectCurrentJd()" class="hidden px-3 py-1.5 rounded-lg border border-indigo-200 bg-indigo-50 hover:bg-indigo-100 text-indigo-700 font-semibold transition flex items-center gap-1.5 shadow-2xs">
+            <i class="fa-solid fa-file-lines text-indigo-600"></i> Inspect JD Text
+          </button>
+          <button onclick="resetSearch()" class="px-3 py-1.5 rounded-lg border border-slate-200 hover:bg-slate-100 text-slate-600 font-semibold transition">
+            Clear
+          </button>
+        </div>
+      </div>
+
+      <!-- EMPTY STATE (SHOWN BEFORE SEARCH) -->
+      <div id="emptyState" class="bg-white rounded-2xl border border-dashed border-slate-300 p-12 text-center space-y-3">
+        <div class="w-16 h-16 mx-auto rounded-full bg-indigo-50 text-indigo-500 flex items-center justify-center text-2xl">
+          <i class="fa-solid fa-crosshairs"></i>
+        </div>
+        <h3 class="text-base font-bold text-slate-800">No Job Description Submitted Yet</h3>
+        <p class="text-xs text-slate-500 max-w-md mx-auto leading-relaxed">
+          Paste a job description or upload a document on the left, then click <strong>"Match Candidates"</strong> to query all 590 vector-indexed resumes in real-time.
+        </p>
+      </div>
+
+      <!-- LOADING STATE -->
+      <div id="loadingState" class="hidden bg-white rounded-2xl border border-slate-200 p-12 text-center space-y-4">
+        <div class="w-12 h-12 mx-auto border-4 border-indigo-200 border-t-indigo-600 rounded-full animate-spin"></div>
+        <p class="text-sm font-bold text-slate-800">Embedding JD and Scanning 590 Resumes...</p>
+        <p class="text-xs text-slate-400">Computing Cosine Similarity via FastEmbed (ONNX Runtime) &bull; Sub-100ms</p>
+      </div>
+
+      <!-- CANDIDATES LIST CONTAINER -->
+      <div id="candidatesList" class="space-y-4"></div>
+
+    </div>
+
+  </main>
+
+  <!-- TOAST NOTIFICATION -->
+  <div id="toast" class="toast">Copied to clipboard!</div>
+
+  <!-- CANDIDATE DETAIL MODAL (RAW JSON) -->
+  <div id="jsonModal" class="hidden fixed inset-0 z-50 bg-slate-900/60 backdrop-blur-xs flex items-center justify-center p-4">
+    <div class="bg-white rounded-2xl shadow-2xl max-w-2xl w-full max-h-[85vh] flex flex-col overflow-hidden border border-slate-200 animate-in fade-in zoom-in-95 duration-150">
+      <div class="p-4 border-b border-slate-200 flex items-center justify-between bg-slate-50">
+        <h3 id="modalTitle" class="font-bold text-sm text-slate-900">Candidate Profile Details</h3>
+        <button onclick="closeModal()" class="text-slate-400 hover:text-slate-600 text-lg font-bold px-2 py-1">&times;</button>
+      </div>
+      <div class="p-4 overflow-y-auto flex-1 font-mono text-xs bg-slate-900 text-slate-100">
+        <pre id="modalJsonContent" class="whitespace-pre-wrap"></pre>
+      </div>
+      <div class="p-3 bg-slate-100 border-t border-slate-200 flex justify-end">
+        <button onclick="closeModal()" class="px-4 py-2 rounded-lg bg-white border border-slate-300 text-xs font-semibold hover:bg-slate-50 transition">Close</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- JD TEXT INSPECTION MODAL -->
+  <div id="jdInspectModal" class="hidden fixed inset-0 z-50 bg-slate-900/60 backdrop-blur-xs flex items-center justify-center p-4">
+    <div class="bg-white rounded-2xl shadow-2xl max-w-3xl w-full max-h-[85vh] flex flex-col overflow-hidden border border-slate-200 animate-in fade-in zoom-in-95 duration-150">
+      <div class="p-4 border-b border-slate-200 flex items-center justify-between bg-slate-50">
+        <div>
+          <h3 id="jdInspectTitle" class="font-bold text-sm text-slate-900 flex items-center gap-2">
+            <i class="fa-solid fa-file-invoice text-indigo-600"></i>
+            Extracted Job Description Text
+          </h3>
+          <p id="jdInspectSubtitle" class="text-xs text-slate-500 mt-0.5">Method: Loading...</p>
+        </div>
+        <button onclick="closeJdModal()" class="text-slate-400 hover:text-slate-600 text-lg font-bold px-2 py-1">&times;</button>
+      </div>
+      <div class="p-4 overflow-y-auto flex-1 font-mono text-xs bg-slate-50 text-slate-800 leading-relaxed border-b border-slate-200">
+        <pre id="jdInspectContent" class="whitespace-pre-wrap font-mono"></pre>
+      </div>
+      <div class="p-3 bg-white flex flex-wrap items-center justify-between gap-2">
+        <div id="jdInspectExpBadge" class="text-xs font-semibold text-indigo-700"></div>
+        <div class="flex items-center gap-2">
+          <button onclick="copyExtractedJdText()" class="px-3 py-1.5 rounded-lg bg-slate-100 hover:bg-slate-200 text-slate-700 text-xs font-semibold transition flex items-center gap-1.5">
+            <i class="fa-regular fa-copy"></i> Copy Text
+          </button>
+          <button onclick="transferJdToEditor()" class="px-3 py-1.5 rounded-lg bg-indigo-50 hover:bg-indigo-100 text-indigo-700 text-xs font-semibold transition flex items-center gap-1.5">
+            <i class="fa-solid fa-pen-to-square"></i> Edit in Text Tab
+          </button>
+          <button onclick="closeJdModal()" class="px-4 py-1.5 rounded-lg bg-slate-900 text-white text-xs font-semibold hover:bg-slate-800 transition">Close</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- RESUME UPLOAD MODAL -->
+  <div id="uploadResumesModal" class="hidden fixed inset-0 z-50 bg-slate-900/60 backdrop-blur-xs flex items-center justify-center p-4">
+    <div class="bg-white rounded-2xl shadow-2xl max-w-2xl w-full max-h-[90vh] flex flex-col overflow-hidden border border-slate-200 animate-in fade-in zoom-in-95 duration-150">
+      <div class="p-4 border-b border-slate-200 flex items-center justify-between bg-slate-50">
+        <div>
+          <h3 class="font-bold text-sm text-slate-900 flex items-center gap-2">
+            <i class="fa-solid fa-file-circle-plus text-indigo-600"></i>
+            Ingest New Resumes
+          </h3>
+          <p class="text-xs text-slate-500 mt-0.5">Parse, number, embed and index new resumes into Qdrant & flat_json.</p>
+        </div>
+        <button onclick="closeUploadModal()" class="text-slate-400 hover:text-slate-600 text-lg font-bold px-2 py-1">&times;</button>
+      </div>
+
+      <div class="p-6 overflow-y-auto flex-1 space-y-4">
+        <!-- DRAG AND DROP ZONE -->
+        <div id="resumeDropZone" onclick="document.getElementById('multiResumeInput').click()" class="border-2 border-dashed border-slate-300 hover:border-indigo-500 rounded-xl p-8 text-center bg-slate-50 hover:bg-indigo-50/40 transition cursor-pointer">
+          <i class="fa-solid fa-cloud-arrow-up text-3xl text-indigo-500 mb-2"></i>
+          <p class="text-xs font-bold text-slate-800">Select or drop 1 or more resumes</p>
+          <p class="text-[11px] text-slate-400 mt-1">Supports PDF, DOCX, DOC, Images (PNG, JPG) or TXT</p>
+          <input type="file" id="multiResumeInput" multiple accept=".pdf,.docx,.doc,.png,.jpg,.jpeg,.txt" class="hidden" onchange="handleResumeFileSelection(this)">
+        </div>
+
+        <!-- SELECTED FILES PREVIEW -->
+        <div id="selectedFilesContainer" class="hidden space-y-2">
+          <h4 class="text-xs font-bold text-slate-700 flex items-center justify-between">
+            <span>Selected Files (<span id="selectedFilesCount">0</span>)</span>
+            <button onclick="clearSelectedResumes()" class="text-[11px] text-rose-600 hover:underline">Clear all</button>
+          </h4>
+          <div id="selectedFilesList" class="max-h-36 overflow-y-auto space-y-1.5 p-2 bg-slate-100 rounded-lg text-xs font-mono"></div>
+        </div>
+
+        <!-- INGESTION PROGRESS -->
+        <div id="ingestProgress" class="hidden p-4 rounded-xl bg-indigo-50 border border-indigo-200 text-center space-y-2">
+          <div class="inline-block animate-spin text-indigo-600 text-xl"><i class="fa-solid fa-circle-notch"></i></div>
+          <p class="text-xs font-bold text-indigo-900" id="ingestStatusText">Parsing, extracting & embedding resumes on CPU...</p>
+          <p class="text-[11px] text-indigo-600">Assigning sequential IDs & upserting directly to Qdrant</p>
+        </div>
+
+        <!-- INGESTION RESULTS -->
+        <div id="ingestResults" class="hidden space-y-2">
+          <h4 class="text-xs font-bold text-emerald-700 flex items-center gap-1.5">
+            <i class="fa-solid fa-circle-check"></i> Ingested Successfully
+          </h4>
+          <div id="ingestResultsList" class="max-h-48 overflow-y-auto space-y-2"></div>
+        </div>
+      </div>
+
+      <div class="p-3 bg-slate-100 border-t border-slate-200 flex justify-between items-center">
+        <span class="text-[11px] text-slate-500" id="modalFooterInfo">Sequential counting ID will auto-increment.</span>
+        <div class="flex items-center gap-2">
+          <button onclick="closeUploadModal()" class="px-4 py-2 rounded-lg bg-white border border-slate-300 text-xs font-semibold hover:bg-slate-50 transition">Close</button>
+          <button id="startIngestBtn" onclick="submitNewResumes()" disabled class="px-4 py-2 rounded-lg bg-indigo-600 text-white text-xs font-semibold hover:bg-indigo-700 transition disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-1.5">
+            <i class="fa-solid fa-play"></i> Start Ingestion
+          </button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <footer class="bg-white border-t border-slate-200 py-4 mt-auto text-center text-xs text-slate-400">
+    Pure Python ATS Engine &bull; Qdrant Vector Engine &bull; Local CPU Inference &bull; $0 Cloud Cost
+  </footer>
+
+  <!-- APPLICATION SCRIPTS -->
+  <script>
+    let currentTab = 'text';
+    let lastExtractedJd = null;
+
+    function switchTab(tab) {
+      currentTab = tab;
+      const textBtn = document.getElementById('tabTextBtn');
+      const fileBtn = document.getElementById('tabFileBtn');
+      const textContent = document.getElementById('textTabContent');
+      const fileContent = document.getElementById('fileTabContent');
+
+      if (tab === 'text') {
+        textBtn.className = "flex-1 py-2 rounded-lg bg-white text-indigo-700 shadow-xs transition flex items-center justify-center gap-1.5";
+        fileBtn.className = "flex-1 py-2 rounded-lg hover:text-slate-900 transition flex items-center justify-center gap-1.5";
+        textContent.classList.remove('hidden');
+        fileContent.classList.add('hidden');
+      } else {
+        fileBtn.className = "flex-1 py-2 rounded-lg bg-white text-indigo-700 shadow-xs transition flex items-center justify-center gap-1.5";
+        textBtn.className = "flex-1 py-2 rounded-lg hover:text-slate-900 transition flex items-center justify-center gap-1.5";
+        fileContent.classList.remove('hidden');
+        textContent.classList.add('hidden');
+      }
+    }
+
+    function setExpTag(val) {
+      document.getElementById('expTextInput').value = val;
+    }
+
+    // Quick Presets
+    const presets = {
+      ds: "Looking for a Data Scientist / Machine Learning Engineer with 2+ years of hands-on experience in Python, PyTorch, Scikit-Learn, Generative AI, RAG pipelines, LangChain, and Vector Databases (Qdrant/FAISS). Must have experience building and deploying machine learning models and REST APIs.",
+      cloud: "Seeking a Cloud Solutions Architect / DevOps Engineer with deep expertise in AWS (IAM, VPC, EKS, CloudFormation), Docker containerization, Kubernetes, Terraform, CI/CD automation pipelines (Jenkins/GitHub Actions), and infrastructure monitoring.",
+      fullstack: "Hiring a Full Stack Developer proficient in React.js, Node.js, Express, TypeScript, REST APIs, PostgreSQL or MongoDB. Strong debugging skills, experience in microservices architecture, and automated testing.",
+      hr: "Looking for an HR Manager / HRBP with 4+ years of experience in Talent Acquisition, Employee Engagement, HR Operations, Statutory Compliance, Performance Management, and HRMS systems."
+    };
+
+    function setPreset(key) {
+      switchTab('text');
+      document.getElementById('jdTextInput').value = presets[key];
+    }
+
+    // Drag and drop file handling
+    const dropZone = document.getElementById('dropZone');
+    const fileInput = document.getElementById('jdFileInput');
+    const selectedFileInfo = document.getElementById('selectedFileInfo');
+    const selectedFileName = document.getElementById('selectedFileName');
+
+    dropZone.addEventListener('click', () => fileInput.click());
+    dropZone.addEventListener('dragover', (e) => { e.preventDefault(); dropZone.classList.add('border-indigo-500'); });
+    dropZone.addEventListener('dragleave', () => dropZone.classList.remove('border-indigo-500'));
+    dropZone.addEventListener('drop', (e) => {
+      e.preventDefault();
+      dropZone.classList.remove('border-indigo-500');
+      if (e.dataTransfer.files.length > 0) {
+        fileInput.files = e.dataTransfer.files;
+        handleFileSelected();
+      }
+    });
+
+    fileInput.addEventListener('change', handleFileSelected);
+
+    function handleFileSelected() {
+      if (fileInput.files.length > 0) {
+        const file = fileInput.files[0];
+        selectedFileName.textContent = `${file.name} (${(file.size / 1024).toFixed(1)} KB)`;
+        selectedFileInfo.classList.remove('hidden');
+        dropZone.classList.add('hidden');
+      }
+    }
+
+    function clearSelectedFile() {
+      fileInput.value = "";
+      selectedFileInfo.classList.add('hidden');
+      dropZone.classList.remove('hidden');
+    }
+
+    function showToast(message) {
+      const toast = document.getElementById('toast');
+      toast.textContent = message;
+      toast.className = "toast show";
+      setTimeout(() => { toast.className = toast.className.replace("show", ""); }, 2800);
+    }
+
+    function copyToClipboard(text, label) {
+      navigator.clipboard.writeText(text).then(() => {
+        showToast(`Copied ${label}: ${text}`);
+      });
+    }
+
+    // Execute Match Query
+    async function executeMatch() {
+      const textVal = document.getElementById('jdTextInput').value.trim();
+      const hasFile = fileInput.files.length > 0;
+
+      if (currentTab === 'text' && (!textVal || textVal.length < 15)) {
+        alert("Please enter a job description with at least 15 characters.");
+        return;
+      }
+      if (currentTab === 'file' && !hasFile) {
+        alert("Please select a JD file to upload.");
+        return;
+      }
+
+      const matchBtn = document.getElementById('matchBtn');
+      const emptyState = document.getElementById('emptyState');
+      const loadingState = document.getElementById('loadingState');
+      const resultsBanner = document.getElementById('resultsBanner');
+      const candidatesList = document.getElementById('candidatesList');
+
+      matchBtn.disabled = true;
+      emptyState.classList.add('hidden');
+      candidatesList.innerHTML = "";
+      loadingState.classList.remove('hidden');
+      resultsBanner.classList.add('hidden');
+
+      const formData = new FormData();
+      if (currentTab === 'text' || textVal) {
+        formData.append("jd_text", textVal);
+      }
+      if (currentTab === 'file' && hasFile) {
+        formData.append("jd_file", fileInput.files[0]);
+      }
+      formData.append("limit", document.getElementById('limitSelect').value);
+      formData.append("experience", document.getElementById('expTextInput').value.trim());
+      formData.append("mandatory_skills", document.getElementById('mandatorySkillInput').value.trim());
+      formData.append("enable_rerank", document.getElementById('enableRerankToggle').checked);
+
+      try {
+        const res = await fetch("/api/match", {
+          method: "POST",
+          body: formData
+        });
+
+        const data = await res.json();
+        if (!res.ok) {
+          throw new Error(data.detail || "Search failed");
+        }
+
+        renderResults(data);
+      } catch (err) {
+        alert(`Error matching candidates: ${err.message}`);
+        emptyState.classList.remove('hidden');
+      } finally {
+        matchBtn.disabled = false;
+        loadingState.classList.add('hidden');
+      }
+    }
+
+    function renderResults(data) {
+      const banner = document.getElementById('resultsBanner');
+      const countText = document.getElementById('resultCountText');
+      const timingText = document.getElementById('resultTimingText');
+      const expBadge = document.getElementById('expBadge');
+      const list = document.getElementById('candidatesList');
+
+      countText.textContent = `Found ${data.total_matches} Matching Candidates`;
+      let timingStr = `Query in ${data.total_time_ms}ms (Embed: ${data.embed_time_ms}ms, Search: ${data.search_time_ms}ms`;
+      if (data.two_stage_rerank && data.rerank_time_ms !== undefined) {
+        timingStr += `, Cross-Encoder Re-rank: ${data.rerank_time_ms}ms`;
+      }
+      timingStr += `)`;
+      timingText.textContent = timingStr;
+
+      // Update total database count badge if present
+      if (data.total_database_points) {
+        const badge = document.getElementById('telemetryStatus');
+        if (badge) badge.textContent = `${data.total_database_points} Resumes Indexed`;
+        const sub = document.getElementById('candidateCountSubtitle');
+        if (sub) sub.textContent = data.total_database_points;
+      }
+
+      // Render Experience Badge
+      if (data.experience_filter && data.experience_filter.source !== 'none') {
+        const ef = data.experience_filter;
+        if (ef.source === 'jd_auto_detected') {
+          expBadge.className = "px-2.5 py-0.5 rounded-full text-[11px] font-bold border bg-indigo-50 text-indigo-700 border-indigo-200 inline-flex items-center gap-1 shadow-2xs";
+          expBadge.innerHTML = `<i class="fa-solid fa-wand-magic-sparkles text-[10px]"></i> Auto-detected: ${ef.label}`;
+          expBadge.classList.remove('hidden');
+        } else if (ef.source === 'text_input') {
+          expBadge.className = "px-2.5 py-0.5 rounded-full text-[11px] font-bold border bg-emerald-50 text-emerald-700 border-emerald-200 inline-flex items-center gap-1 shadow-2xs";
+          expBadge.innerHTML = `<i class="fa-solid fa-filter text-[10px]"></i> Filter: ${ef.label}`;
+          expBadge.classList.remove('hidden');
+        } else if (ef.source === 'manual_override') {
+          expBadge.className = "px-2.5 py-0.5 rounded-full text-[11px] font-bold border bg-slate-100 text-slate-700 border-slate-200 inline-flex items-center gap-1 shadow-2xs";
+          expBadge.innerHTML = `<i class="fa-solid fa-infinity text-[10px]"></i> ${ef.label}`;
+          expBadge.classList.remove('hidden');
+        }
+      } else {
+        expBadge.classList.add('hidden');
+      }
+
+      // Save extracted JD state for inspector modal
+      lastExtractedJd = {
+        filename: data.source_file || "Pasted JD Text",
+        method: data.extraction_method || "Pasted Text",
+        text: data.extracted_text || "",
+        charCount: data.char_count || (data.extracted_text ? data.extracted_text.length : 0),
+        wordCount: data.word_count || (data.extracted_text ? data.extracted_text.trim().split(/\s+/).length : 0),
+        exp: data.experience_filter
+      };
+      const inspectBtn = document.getElementById('inspectJdBtn');
+      if (inspectBtn) inspectBtn.classList.remove('hidden');
+
+      banner.classList.remove('hidden');
+
+      if (data.candidates.length === 0) {
+        list.innerHTML = `
+          <div class="bg-white rounded-xl border border-slate-200 p-8 text-center text-slate-500 text-sm">
+            No candidates matched the given filters. Try reducing the minimum experience or removing mandatory skill restrictions.
+          </div>
+        `;
+        return;
+      }
+
+      data.candidates.forEach(c => {
+        const card = createCandidateCard(c);
+        list.appendChild(card);
+      });
+    }
+
+    function createCandidateCard(c) {
+      const card = document.createElement('div');
+      card.className = "bg-white border border-slate-200 hover:border-indigo-300 rounded-2xl p-5 shadow-xs hover:shadow-md transition space-y-4";
+
+      // Score color
+      let scoreBadgeClass = "bg-emerald-50 text-emerald-700 border-emerald-200";
+      if (c.match_score < 75) scoreBadgeClass = "bg-indigo-50 text-indigo-700 border-indigo-200";
+      if (c.match_score < 65) scoreBadgeClass = "bg-amber-50 text-amber-700 border-amber-200";
+
+      // Designations text
+      const desigStr = c.designations.length > 0 ? c.designations.slice(0, 2).join(" &bull; ") : "Candidate Profile";
+
+      // Matched skills tags
+      let matchedSkillsHtml = "";
+      if (c.matched_skills.length > 0) {
+        matchedSkillsHtml = c.matched_skills.map(s => `
+          <span class="inline-flex items-center gap-1 text-xs px-2.5 py-1 rounded-md badge-matched font-semibold">
+            <i class="fa-solid fa-check text-[10px]"></i> ${s}
+          </span>
+        `).join("");
+      }
+
+      // Other skills tags
+      let otherSkillsHtml = "";
+      if (c.other_skills.length > 0) {
+        otherSkillsHtml = c.other_skills.slice(0, 10).map(s => `
+          <span class="text-xs px-2 py-0.5 rounded-md badge-other font-medium">
+            ${s}
+          </span>
+        `).join("");
+      }
+
+      // Contacts row
+      let contactsHtml = "";
+      if (c.mobile_number) {
+        contactsHtml += `
+          <button onclick="copyToClipboard('${c.mobile_number}', 'Phone')" class="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-slate-100 hover:bg-slate-200 text-slate-700 text-xs font-semibold transition" title="Click to copy phone">
+            <i class="fa-solid fa-phone text-emerald-600"></i> ${c.mobile_number}
+          </button>
+        `;
+      }
+      if (c.email) {
+        contactsHtml += `
+          <button onclick="copyToClipboard('${c.email}', 'Email')" class="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-slate-100 hover:bg-slate-200 text-slate-700 text-xs font-semibold transition" title="Click to copy email">
+            <i class="fa-solid fa-envelope text-indigo-600"></i> ${c.email}
+          </button>
+        `;
+      }
+      if (c.linkedin) {
+        const link = c.linkedin.startsWith("http") ? c.linkedin : `https://${c.linkedin}`;
+        contactsHtml += `
+          <a href="${link}" target="_blank" class="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-sky-50 hover:bg-sky-100 text-sky-700 text-xs font-semibold transition">
+            <i class="fa-brands fa-linkedin text-sky-600"></i> LinkedIn
+          </a>
+        `;
+      }
+      if (c.github) {
+        const link = c.github.startsWith("http") ? c.github : `https://${c.github}`;
+        contactsHtml += `
+          <a href="${link}" target="_blank" class="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-slate-800 hover:bg-slate-900 text-white text-xs font-semibold transition">
+            <i class="fa-brands fa-github"></i> GitHub
+          </a>
+        `;
+      }
+
+      card.innerHTML = `
+        <div class="flex items-start justify-between gap-3">
+          <div>
+            <div class="flex items-center gap-2">
+              <span class="w-6 h-6 rounded-full bg-slate-100 text-slate-600 text-xs font-bold flex items-center justify-center">#${c.rank}</span>
+              <h3 class="text-base font-bold text-slate-900">${c.name}</h3>
+            </div>
+            <p class="text-xs text-slate-500 font-medium mt-0.5 ml-8">${desigStr}</p>
+          </div>
+          <div class="flex flex-col items-end">
+            <span class="px-3 py-1 rounded-xl text-xs font-extrabold border shadow-xs ${scoreBadgeClass}">
+              ${c.match_score}% Match
+            </span>
+            <span class="text-[10px] text-slate-400 mt-1 font-mono text-right">
+              ${c.cross_encoder_score !== null ? `Cosine: ${c.raw_score} &bull; Cross-Encoder: ${c.cross_encoder_score}` : `Cosine: ${c.raw_score}`}
+            </span>
+          </div>
+        </div>
+
+        <!-- CONTACT INFO -->
+        <div class="flex flex-wrap items-center gap-2 pt-1">
+          ${contactsHtml}
+        </div>
+
+        <!-- KEY METRICS ROW -->
+        <div class="grid grid-cols-2 sm:grid-cols-3 gap-2 bg-slate-50 rounded-xl p-3 text-xs border border-slate-100">
+          <div>
+            <span class="text-slate-400 block font-medium">Total Experience</span>
+            <span class="font-bold text-slate-800">${c.total_experience > 0 ? c.total_experience + ' years' : 'Not specified'}</span>
+          </div>
+          <div>
+            <span class="text-slate-400 block font-medium">Education</span>
+            <span class="font-bold text-slate-800 truncate block">${c.degrees.length > 0 ? c.degrees.join(', ') : 'Not specified'}</span>
+          </div>
+          <div class="col-span-2 sm:col-span-1">
+            <span class="text-slate-400 block font-medium">Original File</span>
+            <a href="/api/resume/${encodeURIComponent(c.file_name)}" target="_blank" class="font-bold text-indigo-600 hover:underline truncate block" title="Download Original File">
+              <i class="fa-solid fa-download text-[10px]"></i> ${c.file_name}
+            </a>
+          </div>
+        </div>
+
+        <!-- SKILLS SECTION -->
+        <div class="space-y-1.5">
+          <div class="flex items-center justify-between text-xs font-semibold text-slate-600">
+            <span>Skills Breakdown (${c.total_skills_count} total):</span>
+            ${c.matched_skills.length > 0 ? `<span class="text-emerald-700 font-bold">${c.matched_skills.length} skills match JD</span>` : ''}
+          </div>
+          <div class="flex flex-wrap items-center gap-1.5">
+            ${matchedSkillsHtml}
+            ${otherSkillsHtml}
+          </div>
+        </div>
+
+        <!-- SUMMARY SNIPPET (IF ANY) -->
+        ${c.summary ? `
+          <div class="text-xs text-slate-600 bg-slate-50/70 p-2.5 rounded-lg border border-slate-100 italic leading-relaxed">
+            "${c.summary.length > 250 ? c.summary.slice(0, 250) + '...' : c.summary}"
+          </div>
+        ` : ''}
+
+        <!-- CARD FOOTER ACTIONS -->
+        <div class="pt-2 border-t border-slate-100 flex items-center justify-between text-xs">
+          <span class="text-slate-400">Candidate ID: #${c.id}</span>
+          <button onclick="viewFullProfile(${c.id})" class="text-indigo-600 hover:text-indigo-800 font-bold flex items-center gap-1 transition">
+            View Full Profile Data <i class="fa-solid fa-chevron-right text-[10px]"></i>
+          </button>
+        </div>
+      `;
+
+      return card;
+    }
+
+    async function viewFullProfile(id) {
+      try {
+        const res = await fetch(`/api/candidate/${id}`);
+        const data = await res.json();
+        document.getElementById('modalTitle').textContent = `Candidate Profile: ${data.name || 'Candidate #' + id} (${data.file_name})`;
+        document.getElementById('modalJsonContent').textContent = JSON.stringify(data, null, 2);
+        document.getElementById('jsonModal').classList.remove('hidden');
+      } catch (err) {
+        alert("Failed to load full profile: " + err);
+      }
+    }
+
+    function closeModal() {
+      document.getElementById('jsonModal').classList.add('hidden');
+    }
+
+    function resetSearch() {
+      document.getElementById('candidatesList').innerHTML = "";
+      document.getElementById('resultsBanner').classList.add('hidden');
+      document.getElementById('emptyState').classList.remove('hidden');
+      document.getElementById('jdTextInput').value = "";
+      document.getElementById('expTextInput').value = "";
+      const expBadge = document.getElementById('expBadge');
+      if (expBadge) expBadge.classList.add('hidden');
+      const inspectBtn = document.getElementById('inspectJdBtn');
+      if (inspectBtn) inspectBtn.classList.add('hidden');
+      lastExtractedJd = null;
+      clearSelectedFile();
+    }
+
+    // JD Text Inspection & OCR Preview Handlers
+    async function previewUploadedJdText() {
+      if (!fileInput.files || fileInput.files.length === 0) {
+        alert("Please select a file first.");
+        return;
+      }
+      const btn = document.getElementById('previewJdBtn');
+      const originalHtml = btn.innerHTML;
+      btn.innerHTML = `<i class="fa-solid fa-spinner animate-spin text-[10px]"></i> Extracting...`;
+      btn.disabled = true;
+
+      const fd = new FormData();
+      fd.append("jd_file", fileInput.files[0]);
+
+      try {
+        const res = await fetch("/api/extract-jd", {
+          method: "POST",
+          body: fd
+        });
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.detail || "Extraction failed");
+
+        lastExtractedJd = {
+          filename: data.filename,
+          method: data.extraction_method,
+          text: data.extracted_text,
+          charCount: data.char_count,
+          wordCount: data.word_count,
+          exp: data.detected_experience
+        };
+        showJdInspectModal();
+      } catch (err) {
+        alert("Error extracting JD text: " + err.message);
+      } finally {
+        btn.innerHTML = originalHtml;
+        btn.disabled = false;
+      }
+    }
+
+    function inspectCurrentJd() {
+      if (!lastExtractedJd) {
+        alert("No extracted JD text available to inspect.");
+        return;
+      }
+      showJdInspectModal();
+    }
+
+    function showJdInspectModal() {
+      if (!lastExtractedJd) return;
+      document.getElementById('jdInspectTitle').innerHTML = `
+        <i class="fa-solid fa-file-invoice text-indigo-600"></i>
+        ${lastExtractedJd.filename || 'Job Description Text'}
+      `;
+      document.getElementById('jdInspectSubtitle').textContent = `
+        Extraction: ${lastExtractedJd.method || 'Native Text'} • ${lastExtractedJd.wordCount} words • ${lastExtractedJd.charCount} characters
+      `;
+      document.getElementById('jdInspectContent').textContent = lastExtractedJd.text || "No text extracted.";
+
+      const expDiv = document.getElementById('jdInspectExpBadge');
+      if (lastExtractedJd.exp && lastExtractedJd.exp.source !== 'none') {
+        expDiv.innerHTML = `<span class="bg-indigo-50 border border-indigo-200 text-indigo-700 px-2.5 py-1 rounded-md font-bold text-xs"><i class="fa-solid fa-clock-rotate-left mr-1"></i>Detected Exp: ${lastExtractedJd.exp.label}</span>`;
+      } else {
+        expDiv.innerHTML = `<span class="text-slate-400 text-xs">Experience: Any / Not restricted</span>`;
+      }
+
+      document.getElementById('jdInspectModal').classList.remove('hidden');
+    }
+
+    function closeJdModal() {
+      document.getElementById('jdInspectModal').classList.add('hidden');
+    }
+
+    function copyExtractedJdText() {
+      if (!lastExtractedJd || !lastExtractedJd.text) return;
+      copyToClipboard(lastExtractedJd.text, 'Extracted JD Text');
+    }
+
+    function transferJdToEditor() {
+      if (!lastExtractedJd || !lastExtractedJd.text) return;
+      switchTab('text');
+      document.getElementById('jdTextInput').value = lastExtractedJd.text;
+      closeJdModal();
+      showToast("Transferred extracted text to editor!");
+    }
+
+    // --- RESUME INGESTION MODAL LOGIC ---
+    let selectedResumeFiles = [];
+
+    function openUploadModal() {
+      document.getElementById('uploadResumesModal').classList.remove('hidden');
+    }
+
+    function closeUploadModal() {
+      document.getElementById('uploadResumesModal').classList.add('hidden');
+    }
+
+    function handleResumeFileSelection(input) {
+      if (!input.files || input.files.length === 0) return;
+      for (let i = 0; i < input.files.length; i++) {
+        selectedResumeFiles.push(input.files[i]);
+      }
+      renderSelectedResumes();
+    }
+
+    function clearSelectedResumes() {
+      selectedResumeFiles = [];
+      document.getElementById('multiResumeInput').value = '';
+      renderSelectedResumes();
+    }
+
+    function renderSelectedResumes() {
+      const container = document.getElementById('selectedFilesContainer');
+      const list = document.getElementById('selectedFilesList');
+      const count = document.getElementById('selectedFilesCount');
+      const btn = document.getElementById('startIngestBtn');
+
+      if (selectedResumeFiles.length === 0) {
+        container.classList.add('hidden');
+        btn.disabled = true;
+        return;
+      }
+
+      container.classList.remove('hidden');
+      count.textContent = selectedResumeFiles.length;
+      btn.disabled = false;
+
+      list.innerHTML = selectedResumeFiles.map((f, i) => `
+        <div class="flex items-center justify-between py-1 px-2 bg-white rounded border border-slate-200">
+          <span class="truncate flex items-center gap-1.5 text-slate-800">
+            <i class="fa-regular fa-file text-indigo-500"></i> ${f.name}
+          </span>
+          <span class="text-[10px] text-slate-400">(${(f.size / 1024).toFixed(1)} KB)</span>
+        </div>
+      `).join('');
+    }
+
+    async function submitNewResumes() {
+      if (selectedResumeFiles.length === 0) return;
+
+      const progress = document.getElementById('ingestProgress');
+      const resultsDiv = document.getElementById('ingestResults');
+      const resultsList = document.getElementById('ingestResultsList');
+      const btn = document.getElementById('startIngestBtn');
+
+      progress.classList.remove('hidden');
+      resultsDiv.classList.add('hidden');
+      btn.disabled = true;
+
+      const fd = new FormData();
+      selectedResumeFiles.forEach(f => {
+        fd.append('files', f);
+      });
+
+      try {
+        const res = await fetch('/api/resumes/upload', {
+          method: 'POST',
+          body: fd
+        });
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.detail || 'Ingestion failed');
+
+        progress.classList.add('hidden');
+        resultsDiv.classList.remove('hidden');
+
+        // Update telemetry badge
+        if (data.total_database_points) {
+          document.getElementById('telemetryStatus').textContent = `${data.total_database_points} Resumes Indexed`;
+        }
+
+        resultsList.innerHTML = data.ingested_resumes.map(r => `
+          <div class="p-3 bg-emerald-50/60 border border-emerald-200 rounded-xl text-xs space-y-1">
+            <div class="flex items-center justify-between">
+              <span class="font-bold text-slate-900 flex items-center gap-2">
+                <span class="px-2 py-0.5 rounded bg-indigo-100 text-indigo-800 font-mono text-[11px]">ID #${r.id}</span>
+                ${r.name}
+              </span>
+              <span class="text-[11px] text-emerald-700 font-semibold">${r.total_experience} yrs exp</span>
+            </div>
+            <p class="text-[11px] text-slate-500 truncate">${r.file_name} • ${r.skills_count} skills extracted</p>
+            <div class="flex flex-wrap gap-1 mt-1">
+              ${(r.skills_sample || []).slice(0, 6).map(s => `<span class="px-1.5 py-0.5 bg-white border border-slate-200 text-slate-600 rounded text-[10px]">${s}</span>`).join('')}
+            </div>
+          </div>
+        `).join('');
+
+        showToast(`Successfully ingested ${data.ingested_count} resume(s)!`);
+        selectedResumeFiles = [];
+        document.getElementById('selectedFilesContainer').classList.add('hidden');
+
+      } catch (err) {
+        progress.classList.add('hidden');
+        alert('Ingestion error: ' + err.message);
+        btn.disabled = false;
+      }
+    }
+
+    // Automatically synchronize database points count on page load
+    async function fetchLiveStats() {
+      try {
+        const res = await fetch('/api/stats');
+        const data = await res.json();
+        if (data.points_count !== undefined) {
+          const badge = document.getElementById('telemetryStatus');
+          if (badge) badge.textContent = `${data.points_count} Resumes Indexed`;
+          const sub = document.getElementById('candidateCountSubtitle');
+          if (sub) sub.textContent = data.points_count;
+        }
+      } catch (e) {
+        console.error('Failed to load telemetry stats:', e);
+      }
+    }
+
+    document.addEventListener('DOMContentLoaded', fetchLiveStats);
+    fetchLiveStats();
+  </script>
+</body>
+</html>
