@@ -7,6 +7,7 @@ and pure Python ATS extraction engine.
 """
 
 import os
+import sys
 import io
 import re
 import time
@@ -26,18 +27,56 @@ from fastembed import TextEmbedding
 from flashrank import Ranker, RerankRequest
 from dotenv import load_dotenv
 
-from run_pipeline import process_resume
-from scripts.ingest_to_qdrant import build_candidate_search_text
-
 # Load environment variables from .env
 load_dotenv()
+
+# Import ATS Resume Parser & Real-Time Qdrant Sync Engine
+sys.path.insert(0, "/home/intileo/Desktop/python-based-parser/ats_parser")
+from run_pipeline import process_resume
+from qdrant_sync import sync_resume_to_qdrant
+
+def parse_demographic_criteria(text: Optional[str]) -> Dict[str, Any]:
+    """
+    Parses recruiter notes or additional_info for explicit gender and age filtering requirements.
+    E.g.:
+      - 'female candidates only, age below 35' -> {'gender': 'female', 'max_age': 35.0}
+      - 'prefer male, age 28-35' -> {'gender': 'male', 'min_age': 28.0, 'max_age': 35.0}
+    """
+    if not text or not text.strip():
+        return {}
+    res = {}
+
+    # 1. Gender detection
+    if re.search(r"\b(?:female\s*only|only\s*female|female|women|woman)\b", text, re.I):
+        res["gender"] = "female"
+    elif re.search(r"\b(?:male\s*only|only\s*male|male|men|man)\b", text, re.I):
+        res["gender"] = "male"
+
+    # 2. Age Range: e.g. 'age: 25-35', 'age 25 to 35', 'between 25 and 35'
+    m_range = re.search(r"\b(?:age\s*[:\-]?\s*|between\s+)?(\d{2})\s*(?:-|to|and)\s*(\d{2})\s*(?:years?|yrs|age)?\b", text, re.I)
+    if m_range and ("age" in text.lower() or "years" in text.lower() or "yrs" in text.lower()):
+        v1, v2 = float(m_range.group(1)), float(m_range.group(2))
+        if 18 <= v1 <= 75 and 18 <= v2 <= 75:
+            res["min_age"] = min(v1, v2)
+            res["max_age"] = max(v1, v2)
+
+    # 3. Age bounds (below / above)
+    if "min_age" not in res and "max_age" not in res:
+        m_below = re.search(r"\b(?:age\s*(?:below|<|under|less\s+than|<=|max)\s*[:\-]?\s*|max\s*age\s*[:\-]?\s*)(\d{2})\b", text, re.I)
+        if m_below:
+            res["max_age"] = float(m_below.group(1))
+
+        m_above = re.search(r"\b(?:age\s*(?:above|>|greater\s+than|>=|min)\s*[:\-]?\s*|min\s*age\s*[:\-]?\s*)(\d{2})\b", text, re.I)
+        if m_above:
+            res["min_age"] = float(m_above.group(1))
+
+    return res
 
 # Directories
 BASE_DIR = Path(__file__).resolve().parent
 TEMPLATES_DIR = BASE_DIR / "templates"
 STATIC_DIR = BASE_DIR / "static"
 RESUMES_DIR = BASE_DIR / "resumes"
-FLAT_JSON_DIR = BASE_DIR / "flat_json"
 MODELS_DIR = BASE_DIR / "models"
 MODELS_DIR.mkdir(exist_ok=True)
 
@@ -45,7 +84,7 @@ HOST = os.getenv("HOST", "0.0.0.0")
 PORT = int(os.getenv("PORT", 8000))
 QDRANT_URL = os.getenv("QDRANT_URL", "http://localhost:6333")
 COLLECTION_NAME = os.getenv("COLLECTION_NAME", "resumes")
-EMBED_MODEL_NAME = os.getenv("EMBED_MODEL_NAME", "BAAI/bge-small-en-v1.5")
+EMBED_MODEL_NAME = os.getenv("EMBED_MODEL_NAME", "jinaai/jina-embeddings-v2-small-en")
 RERANK_MODEL_NAME = os.getenv("RERANK_MODEL_NAME", "ms-marco-TinyBERT-L-2-v2")
 
 app = FastAPI(
@@ -81,7 +120,8 @@ def startup_event():
 
     print(f"Loading FastEmbed model '{EMBED_MODEL_NAME}' (ONNX Runtime CPU)...")
     t0 = time.perf_counter()
-    embed_model = TextEmbedding(model_name=EMBED_MODEL_NAME)
+    embed_model = TextEmbedding(model_name=EMBED_MODEL_NAME, max_length=2048)
+    embed_model.model.tokenizer.enable_truncation(max_length=2048)
     print(f"✓ Embed model loaded in {time.perf_counter() - t0:.2f}s")
 
     print(f"Loading FlashRank Cross-Encoder '{RERANK_MODEL_NAME}' (ONNX Runtime CPU)...")
@@ -198,35 +238,40 @@ def extract_experience_from_text(text: str) -> Tuple[Optional[float], Optional[f
 
     dash_re = r"(?:[\-–—‒―−]|to)"
 
-    # Range: '0-1', '2-5', '2–6', '5-10yr', '5-10 yrs', '5 to 10 years'
-    m = re.search(r"(\d+(?:\.\d+)?)\s*" + dash_re + r"\s*(\d+(?:\.\d+)?)\s*(?:years?|yrs?)?", s)
-    if m:
+    # Range: '0-1', '2-5', '2–6', '5-10yr', '5-10 yrs', '5 to 10 years', '(4-6) years'
+    for m in re.finditer(r"[\(\[]?\s*(\d+(?:\.\d+)?)\s*" + dash_re + r"\s*(\d+(?:\.\d+)?)\s*[\)\]]?\s*(?:years?|yrs?)?", s):
         mn, mx = float(m.group(1)), float(m.group(2))
-        return mn, mx, f"{mn} - {mx} years"
+        # Guard against calendar years (e.g. 2015-16, 2021-2024)
+        if mn <= 35.0 and mx <= 35.0 and mn <= mx:
+            return mn, mx, f"{mn} - {mx} years"
 
     # Plus: '2+', '2 +', '3+ yr', '5+ yrs'
     m = re.search(r"(\d+(?:\.\d+)?)\s*\+\s*(?:years?|yrs?)?", s)
     if m:
         mn = float(m.group(1))
-        return mn, None, f"{mn}+ years"
+        if mn <= 35.0:
+            return mn, None, f"{mn}+ years"
 
     # Min / At least: 'min 3', 'at least 4 yrs'
     m = re.search(r"(?:min|minimum|at\s*least|more\s*than|over|>=|>)\s*(\d+(?:\.\d+)?)\s*(?:years?|yrs?)?", s)
     if m:
         mn = float(m.group(1))
-        return mn, None, f"{mn}+ years"
+        if mn <= 35.0:
+            return mn, None, f"{mn}+ years"
 
     # Max / Up to: 'max 4', 'up to 3 yrs', '<=5', '<5'
     m = re.search(r"(?:max|maximum|up\s*to|upto|<=|<)\s*(\d+(?:\.\d+)?)\s*(?:years?|yrs?)?", s)
     if m:
         mx = float(m.group(1))
-        return 0.0, mx, f"Up to {mx} years"
+        if mx <= 35.0:
+            return 0.0, mx, f"Up to {mx} years"
 
     # Single number: '3', '3yr', '3 yrs', '3 years'
     m = re.search(r"^(\d+(?:\.\d+)?)\s*(?:years?|yrs?)?$", s)
     if m:
         mn = float(m.group(1))
-        return mn, None, f"{mn}+ years"
+        if mn <= 35.0:
+            return mn, None, f"{mn}+ years"
 
     return None, None, ""
 
@@ -234,9 +279,9 @@ def extract_experience_from_text(text: str) -> Tuple[Optional[float], Optional[f
 def extract_experience_from_jd(jd_text: str) -> Tuple[Optional[float], Optional[float], str]:
     """
     Auto-detects experience requirements from full Job Description text.
-    Handles ranges ('3-5 years', '2–6 Years'), plus ('2+ years'), min ('at least 4 years'), and freshers.
+    Handles ranges ('3-5 years', '2–6 Years', '(4 – 6) years'), plus ('2+ years'), min ('at least 4 years'), and freshers.
     Supports all Unicode dash variations (hyphen, en-dash, em-dash) and multi-line headers ('Experience \n 2–6 Years').
-    Avoids false positives from version numbers (Python 3.10) or shift hours (24/7).
+    Avoids false positives from calendar years (2015-16), version numbers (Python 3.10), or shift hours (24/7).
     """
     if not jd_text:
         return None, None, ""
@@ -244,61 +289,94 @@ def extract_experience_from_jd(jd_text: str) -> Tuple[Optional[float], Optional[
     dash_re = r"(?:[\-–—‒―−]|to)"
 
     # Priority 1: Explicit total/overall/relevant experience
-    p1 = re.search(r"(?:total|overall|relevant)\s+experience\s*(?:of|is|:|-)?\s*(\d+(?:\.\d+)?)\s*" + dash_re + r"\s*(\d+(?:\.\d+)?)\s*(?:years?|yrs?)?", text)
-    if p1:
+    for p1 in re.finditer(r"(?:total|overall|relevant)\s+experience\s*(?:of|is|:|-)?\s*[\(\[]?\s*(\d+(?:\.\d+)?)\s*" + dash_re + r"\s*(\d+(?:\.\d+)?)\s*[\)\]]?\s*(?:years?|yrs?)?", text):
         mn, mx = float(p1.group(1)), float(p1.group(2))
-        return mn, mx, f"{mn} - {mx} years"
+        if mn <= 35.0 and mx <= 35.0 and mn <= mx:
+            return mn, mx, f"{mn} - {mx} years"
 
-    p1_plus = re.search(r"(?:total|overall|relevant)\s+experience\s*(?:of|is|:|-)?\s*(\d+(?:\.\d+)?)\s*\+\s*(?:years?|yrs?)?", text)
-    if p1_plus:
+    for p1_plus in re.finditer(r"(?:total|overall|relevant)\s+experience\s*(?:of|is|:|-)?\s*(\d+(?:\.\d+)?)\s*\+\s*(?:years?|yrs?)?", text):
         mn = float(p1_plus.group(1))
-        return mn, None, f"{mn}+ years"
-
-    # Priority 2: Experience field: 'experience: 3-5 yrs', 'Experience \n 2–6 Years', 'Experience - 2 to 4'
-    p2 = re.search(r"\bexperience\s*(?:[:\-–—\n]|\s+)\s*(\d+(?:\.\d+)?)\s*" + dash_re + r"\s*(\d+(?:\.\d+)?)\s*(?:years?|yrs?)?", text)
-    if p2:
-        mn, mx = float(p2.group(1)), float(p2.group(2))
-        return mn, mx, f"{mn} - {mx} years"
-
-    p2_plus = re.search(r"\bexperience\s*(?:[:\-–—\n]|\s+)\s*(\d+(?:\.\d+)?)\s*\+?\s*(?:years?|yrs?)?", text)
-    if p2_plus:
-        mn = float(p2_plus.group(1))
-        if mn > 0:
+        if mn <= 35.0:
             return mn, None, f"{mn}+ years"
 
-    # Priority 3: 'X to Y years of experience' or 'X-Y years experience'
-    p3 = re.search(r"(\d+(?:\.\d+)?)\s*" + dash_re + r"\s*(\d+(?:\.\d+)?)\s*(?:years?|yrs?)\s*(?:of)?\s*(?:relevant|hands-on|industry|work)?\s*experience", text)
-    if p3:
+    # Priority 2: Experience field: 'experience: 3-5 yrs', 'Experience \n 2–6 Years', 'Experience - 2 to 4'
+    for p2 in re.finditer(r"\bexperience\s*(?:[:\-–—\n]|\s+)\s*[\(\[]?\s*(\d+(?:\.\d+)?)\s*" + dash_re + r"\s*(\d+(?:\.\d+)?)\s*[\)\]]?\s*(?:years?|yrs?)?", text):
+        mn, mx = float(p2.group(1)), float(p2.group(2))
+        if mn <= 35.0 and mx <= 35.0 and mn <= mx:
+            return mn, mx, f"{mn} - {mx} years"
+
+    for p2_plus in re.finditer(r"\bexperience\s*(?:[:\-–—\n]|\s+)\s*(\d+(?:\.\d+)?)\s*\+?\s*(?:years?|yrs?)?", text):
+        mn = float(p2_plus.group(1))
+        if 0 < mn <= 35.0:
+            return mn, None, f"{mn}+ years"
+
+    # Priority 3: 'X to Y years of experience' or 'X-Y years experience' or '(4 – 6) years of experience'
+    for p3 in re.finditer(r"[\(\[]?\s*(\d+(?:\.\d+)?)\s*" + dash_re + r"\s*(\d+(?:\.\d+)?)\s*[\)\]]?\s*(?:years?|yrs?)\s*(?:of)?\s*(?:relevant|hands-on|industry|work)?\s*experience", text):
         mn, mx = float(p3.group(1)), float(p3.group(2))
-        return mn, mx, f"{mn} - {mx} years"
+        if mn <= 35.0 and mx <= 35.0 and mn <= mx:
+            return mn, mx, f"{mn} - {mx} years"
 
     # Priority 4: 'X+ years of experience' or 'at least X years of experience'
-    p4 = re.search(r"(\d+(?:\.\d+)?)\s*\+\s*(?:years?|yrs?)\s*(?:of)?\s*(?:relevant|hands-on|industry|work)?\s*experience", text)
-    if p4:
+    for p4 in re.finditer(r"(\d+(?:\.\d+)?)\s*\+\s*(?:years?|yrs?)\s*(?:of)?\s*(?:relevant|hands-on|industry|work)?\s*experience", text):
         mn = float(p4.group(1))
-        return mn, None, f"{mn}+ years"
+        if mn <= 35.0:
+            return mn, None, f"{mn}+ years"
 
-    p4_min = re.search(r"(?:minimum|min|at\s*least)\s*(\d+(?:\.\d+)?)\s*(?:years?|yrs?)\s*(?:of)?\s*(?:relevant|hands-on|industry|work)?\s*experience", text)
-    if p4_min:
+    for p4_min in re.finditer(r"(?:minimum|min|at\s*least)\s*(\d+(?:\.\d+)?)\s*(?:years?|yrs?)\s*(?:of)?\s*(?:relevant|hands-on|industry|work)?\s*experience", text):
         mn = float(p4_min.group(1))
-        return mn, None, f"{mn}+ years"
+        if mn <= 35.0:
+            return mn, None, f"{mn}+ years"
 
     # Priority 5: Fresher
     if re.search(r"\b(freshers?\s*(?:welcome|can\s*apply|only)?|entry\s*level(?:\s*role|\s*position|\s*candidate)?)\b", text):
         return 0.0, 1.0, "0 - 1 years (Fresher/Entry)"
 
     # Priority 6: Fallback pattern: 'X-Y years' or 'X+ years'
-    p6 = re.search(r"\b(\d+(?:\.\d+)?)\s*" + dash_re + r"\s*(\d+(?:\.\d+)?)\s*(?:years?|yrs?)\b", text)
-    if p6:
+    for p6 in re.finditer(r"\b(\d+(?:\.\d+)?)\s*" + dash_re + r"\s*(\d+(?:\.\d+)?)\s*(?:years?|yrs?)\b", text):
         mn, mx = float(p6.group(1)), float(p6.group(2))
-        return mn, mx, f"{mn} - {mx} years"
+        if mn <= 35.0 and mx <= 35.0 and mn <= mx:
+            return mn, mx, f"{mn} - {mx} years"
 
-    p6_plus = re.search(r"\b(\d+(?:\.\d+)?)\s*\+\s*(?:years?|yrs?)\b", text)
-    if p6_plus:
+    for p6_plus in re.finditer(r"\b(\d+(?:\.\d+)?)\s*\+\s*(?:years?|yrs?)\b", text):
         mn = float(p6_plus.group(1))
-        return mn, None, f"{mn}+ years"
+        if mn <= 35.0:
+            return mn, None, f"{mn}+ years"
 
     return None, None, ""
+
+
+def clean_jd_text(text: str) -> str:
+    """
+    Production Pre-Processor / Boilerplate Stripper:
+    Strips leading corporate 'About Us', awards, and brand marketing boilerplate from the JD,
+    preserving the job title, profile header, responsibilities, and desired skills.
+    Ensures embeddings and cross-encoders evaluate actual job requirements rather than brand marketing.
+    """
+    if not text or len(text) < 150:
+        return text
+
+    # Check for title/profile line at the very top (e.g. '(Profile: Sales & Services)', 'Position: Consultant')
+    top_header = ""
+    lines = [l.strip() for l in text.splitlines() if l.strip()]
+    for l in lines[:10]:
+        if re.search(r"^\(?(?:profile|position|job\s*title|designation|role)\s*[:\-–—]\s*(.+)\)?$", l, re.I):
+            top_header += l + "\n"
+        elif re.search(r"\b(?:consultant|analyst|engineer|manager|developer|executive|specialist|officer|lead|director)\b", l, re.I) and len(l.split()) <= 8:
+            top_header += l + "\n"
+
+    # Search for job start anchors that indicate the actual job specification begins
+    job_anchor = re.search(
+        r"(?:^|\n)\s*(?:(?:job\s+description|designation|position|role|about\s+the\s+role|role\s+overview|job\s+summary|responsibilities|key\s+responsibilities|what\s+you(?:'\''|’)?ll\s+do|desired\s+skills?|desired\s+skill\s+set|required\s+skills?|key\s+requirements|qualifications?)\s*[:\-–—\n])",
+        text,
+        re.IGNORECASE
+    )
+    if job_anchor and job_anchor.start() > 100:
+        clean_body = text[job_anchor.start():].strip()
+        if top_header and not clean_body.lower().startswith(top_header.lower().strip()):
+            return f"{top_header.strip()}\n\n{clean_body}"
+        return clean_body
+
+    return text
 
 
 def extract_rerank_query(jd_text: str, max_chars: int = 1500) -> str:
@@ -309,12 +387,15 @@ def extract_rerank_query(jd_text: str, max_chars: int = 1500) -> str:
     """
     if not jd_text:
         return ""
-    if len(jd_text) <= max_chars:
-        return jd_text
+    
+    # Pre-clean boilerplate if present
+    cleaned = clean_jd_text(jd_text)
+    if len(cleaned) <= max_chars:
+        return cleaned
 
     # Extract title/role line
     title_line = ""
-    for line in jd_text.splitlines()[:10]:
+    for line in cleaned.splitlines()[:10]:
         l_str = line.strip()
         if re.search(r"^(?:job\s+title|job\s+description|position(?:\s+title)?|designation|role)\s*[:\-–—]\s*(.+)$", l_str, re.I):
             title_line = l_str
@@ -323,40 +404,42 @@ def extract_rerank_query(jd_text: str, max_chars: int = 1500) -> str:
             title_line = l_str
             break
     if not title_line:
-        title_line = jd_text.splitlines()[0][:150].strip()
+        title_line = cleaned.splitlines()[0][:150].strip()
 
-    # Priority 1: Key Responsibilities / Required Technical Skills
+    # Priority 1: Key Responsibilities / Required Technical Skills / Job Description
     match = re.search(
-        r"\b(?:Key\s+Responsibilities|What\s+We\s+Are\s+Looking\s+For|Required\s+Technical\s+Skills|Must\s+Have\s+Skills|Technical\s+Skills|Key\s+Requirements|Required\s+Experience)\b",
-        jd_text,
+        r"\b(?:Job\s+Description|Designation|Desired\s+Skills?|Desired\s+Skill\s+Set|Key\s+Responsibilities|Responsibilities|What\s+We\s+Are\s+Looking\s+For|Required\s+Technical\s+Skills|Must\s+Have\s+Skills|Technical\s+Skills|Key\s+Requirements|Required\s+Experience)\b",
+        cleaned,
         re.IGNORECASE
     )
     if not match:
         match = re.search(
             r"\b(?:Job\s+Summary|Role\s+Summary|Role\s+overview|About\s+the\s+role)\b",
-            jd_text,
+            cleaned,
             re.IGNORECASE
         )
 
     if match:
         start_pos = match.start()
-        tech_chunk = jd_text[start_pos:start_pos + (max_chars - len(title_line) - 10)].strip()
+        tech_chunk = cleaned[start_pos:start_pos + (max_chars - len(title_line) - 10)].strip()
         return f"{title_line}\n\n{tech_chunk}"
 
-    return f"{title_line}\n\n{jd_text[:max_chars]}"
+    return f"{title_line}\n\n{cleaned[:max_chars]}"
 
 
 def resolve_experience_filter(
     experience_text: Optional[str] = None,
+    additional_info: Optional[str] = None,
     jd_text: Optional[str] = None,
     legacy_min_exp: Optional[float] = None
 ) -> Dict[str, Any]:
     """
-    Resolves the active experience filter with precedence:
-      1. Explicit recruiter text input (e.g. '0-1', '2+', '5-10yr')
-      2. Auto-detection from JD text/file
-      3. Legacy min_experience parameter
-      4. None (open to all candidates)
+    Resolves the active experience filter with strict precedence:
+      1. Explicit recruiter experience text input (e.g. '0-1', '2+', '5-10yr')
+      2. Experience criteria in additional_info (e.g. 'experience: 4-8 years', '4-8 yrs')
+      3. Auto-detection from JD text/file
+      4. Legacy min_experience parameter
+      5. None (open to all candidates)
     """
     # 1. Check explicit experience_text
     if experience_text and experience_text.strip():
@@ -379,7 +462,21 @@ def resolve_experience_filter(
                 "label": lbl
             }
 
-    # 2. Check JD auto-detect
+    # 2. Check additional_info for an experience override
+    if additional_info and additional_info.strip():
+        mn, mx, lbl = extract_experience_from_text(additional_info.strip())
+        if mn is None and mx is None:
+            mn, mx, lbl = extract_experience_from_jd(additional_info.strip())
+        if mn is not None or mx is not None:
+            return {
+                "source": "additional_info_override",
+                "raw_input": additional_info.strip(),
+                "min_experience": mn,
+                "max_experience": mx,
+                "label": f"{lbl} (Recruiter Override)"
+            }
+
+    # 3. Check JD auto-detect
     if jd_text:
         mn, mx, lbl = extract_experience_from_jd(jd_text)
         if mn is not None or mx is not None:
@@ -391,7 +488,7 @@ def resolve_experience_filter(
                 "label": lbl
             }
 
-    # 3. Check legacy min_experience
+    # 4. Check legacy min_experience
     if legacy_min_exp is not None and legacy_min_exp > 0.0:
         return {
             "source": "legacy_param",
@@ -435,7 +532,7 @@ async def get_stats():
         "points_count": points_count,
         "status": status,
         "embedding_model": EMBED_MODEL_NAME,
-        "embedding_dim": 384,
+        "embedding_dim": 512,
         "distance": "Cosine",
         "engine": "FastEmbed + ONNX Runtime (CPU)",
         "reranker_model": RERANK_MODEL_NAME if ranker else None,
@@ -448,6 +545,7 @@ async def match_jd(
     request: Request,
     jd_text: Optional[str] = Form(None),
     jd_file: Optional[UploadFile] = File(None),
+    additional_info: Optional[str] = Form(None),
     limit: Optional[int] = Form(None),
     min_experience: Optional[float] = Form(None),
     experience: Optional[str] = Form(None),
@@ -472,6 +570,7 @@ async def match_jd(
     raw_exp_text = ""
     legacy_min_exp = None
     eff_mandatory_skills = ""
+    eff_additional_info = ""
     query_text = ""
     source_filename = None
     extraction_method = "Pasted Text / JSON Body"
@@ -485,6 +584,7 @@ async def match_jd(
         query_text = (body.get("jd_text") or "").strip()
         eff_limit = int(body.get("limit", 10))
         raw_exp_text = str(body.get("experience") or body.get("experience_text") or "").strip()
+        eff_additional_info = str(body.get("additional_info") or "").strip()
         if body.get("min_experience") is not None:
             try:
                 legacy_min_exp = float(body.get("min_experience"))
@@ -495,6 +595,7 @@ async def match_jd(
     else:
         eff_limit = int(limit) if limit is not None else 10
         raw_exp_text = (experience_text or experience or "").strip()
+        eff_additional_info = str(additional_info or "").strip()
         if min_experience is not None:
             try:
                 legacy_min_exp = float(min_experience)
@@ -520,9 +621,10 @@ async def match_jd(
             detail="Please provide a valid Job Description with at least 15 characters, or upload a JD document."
         )
 
-    # 1. Resolve experience requirement (user text input vs JD auto-detection)
+    # 1. Resolve experience requirement (user text input vs additional_info vs JD auto-detection)
     exp_filter = resolve_experience_filter(
         experience_text=raw_exp_text,
+        additional_info=eff_additional_info,
         jd_text=query_text,
         legacy_min_exp=legacy_min_exp
     )
@@ -530,23 +632,31 @@ async def match_jd(
     # 2. Extract keywords from JD to highlight matching skills
     jd_lower = query_text.lower()
 
-    # 3. Embed JD via FastEmbed ONNX
+    # 3. Embed JD via FastEmbed ONNX (pre-processed to isolate job specification from marketing boilerplate)
     t_embed_start = time.perf_counter()
-    query_vector = list(embed_model.embed([query_text]))[0].tolist()
+    clean_job_query = clean_jd_text(query_text)
+    query_vector = list(embed_model.embed([clean_job_query]))[0].tolist()
     t_embed = time.perf_counter() - t_embed_start
 
     # 4. Build Qdrant Filters
     filter_conditions = []
 
-    # Apply experience bounds if any
+    # Apply strict experience bounds: must be within min_exp to max_exp (below or above rejected)
     min_exp = exp_filter.get("min_experience")
     max_exp = exp_filter.get("max_experience")
     if min_exp is not None or max_exp is not None:
         range_args = {}
         if min_exp is not None:
-            range_args["gte"] = min_exp
+            range_args["gte"] = float(min_exp)
         if max_exp is not None:
-            range_args["lte"] = max_exp
+            range_args["lte"] = float(max_exp)
+
+        exp_filter["applied_search_range"] = {
+            "gte": range_args.get("gte"),
+            "lte": range_args.get("lte"),
+            "buffer": "Strict (no buffer)"
+        }
+
         filter_conditions.append(
             models.FieldCondition(
                 key="total_experience",
@@ -564,11 +674,34 @@ async def match_jd(
             )
         )
 
+    # Demographic filters (Gender, Age) parsed from recruiter notes/additional_info
+    demo_criteria = parse_demographic_criteria(eff_additional_info)
+    if demo_criteria.get("gender"):
+        filter_conditions.append(
+            models.FieldCondition(
+                key="gender",
+                match=models.MatchValue(value=demo_criteria["gender"])
+            )
+        )
+    if demo_criteria.get("min_age") is not None or demo_criteria.get("max_age") is not None:
+        age_args = {}
+        if demo_criteria.get("min_age") is not None:
+            age_args["gte"] = float(demo_criteria["min_age"])
+        if demo_criteria.get("max_age") is not None:
+            age_args["lte"] = float(demo_criteria["max_age"])
+        filter_conditions.append(
+            models.FieldCondition(
+                key="age",
+                range=models.Range(**age_args)
+            )
+        )
+
     query_filter = models.Filter(must=filter_conditions) if filter_conditions else None
 
     # 5. Stage 1: Fast Candidate Retrieval via Qdrant Bi-Encoder
     t_search_start = time.perf_counter()
-    initial_fetch_limit = max(eff_limit * 3, 25) if (eff_enable_rerank and ranker) else eff_limit
+    # Broaden Stage 1 pool to 50 candidates so no qualified profile is truncated before Stage 2
+    initial_fetch_limit = max(eff_limit * 5, 50) if (eff_enable_rerank and ranker) else eff_limit
     search_response = qdrant_client.query_points(
         collection_name=COLLECTION_NAME,
         query=query_vector,
@@ -585,17 +718,44 @@ async def match_jd(
         passages = []
         for pt in search_response.points:
             p = pt.payload or {}
-            desigs = ", ".join(p.get("designation", [])[:4])
-            skills = ", ".join(p.get("skills", [])[:25])
+            desigs = ", ".join(p.get("designation", [])[:5])
+            skills = ", ".join(p.get("skills", [])[:30])
             exp = p.get("total_experience", 0.0)
-            summary = (p.get("summary") or "")[:300]
-            comp_lines = [c for c in p.get("company_details", []) if not c.startswith("EXPERIENCE") and not c.startswith("Total experience")]
-            companies = " ".join(comp_lines[:4])
-            text_block = f"Role: {desigs}. Experience: {exp} years. Skills: {skills}. Jobs: {companies}. Summary: {summary}"
+            summary = p.get("summary") or ""
+
+            # Structured work experience responsibilities for cross-encoder
+            we_list = p.get("work_experience") or []
+            exp_resp = []
+            if we_list:
+                for idx, we in enumerate(we_list[:5]):
+                    r = we.get("role") or ""
+                    c = we.get("company") or ""
+                    resp = we.get("responsibilities") or []
+                    if idx == 0:
+                        sel = resp[:3]
+                    elif idx == 1:
+                        sel = resp[:2]
+                    else:
+                        sel = resp[:1]
+                    b_text = " ".join([b.strip() for b in sel])
+                    if b_text:
+                        exp_resp.append(f"{r} @ {c}: {b_text}")
+                    elif r or c:
+                        exp_resp.append(f"{r} @ {c}")
+            elif p.get("company_details"):
+                comp_lines = [c for c in p.get("company_details", []) if not c.startswith("EXPERIENCE") and not c.startswith("Total experience")]
+                exp_resp = comp_lines[:5]
+
+            exp_block = " | ".join(exp_resp)
+            proj_list = p.get("projects") or []
+            proj_str = f" Projects: {'; '.join([str(x).strip() for x in proj_list[:3]])}" if proj_list else ""
+            text_block = f"Role: {desigs}. Experience: {exp} years. Skills: {skills}. Work: {exp_block}. Summary: {summary}.{proj_str}"
             passages.append({"id": pt.id, "text": text_block, "pt": pt})
 
         t_rerank_start = time.perf_counter()
         rerank_query = extract_rerank_query(query_text, max_chars=1500)
+        if eff_additional_info:
+            rerank_query = f"{rerank_query}\n\nAdditional Recruiter Requirements & Notes:\n{eff_additional_info}"
         req = RerankRequest(query=rerank_query, passages=passages)
         reranked_results = ranker.rerank(req)
         t_rerank = time.perf_counter() - t_rerank_start
@@ -620,14 +780,41 @@ async def match_jd(
 
         reranked_results.sort(key=lambda x: x["hybrid_score"], reverse=True)
 
+        # Deduplicate candidates by identity (email/phone/name) so duplicate uploads never repeat
+        seen_identities = set()
+        deduped_results = []
+        for r in reranked_results:
+            p = r["pt"].payload or {}
+            c_name = (p.get("name") or "").strip().lower()
+            c_email = (p.get("email") or "").strip().lower()
+            c_phone = (p.get("mobile_number") or "").strip()
+            ident = c_email if (c_email and c_email not in ["none", "null"]) else (c_phone if len(c_phone) >= 8 else c_name)
+            if ident and ident in seen_identities:
+                continue
+            seen_identities.add(ident)
+            deduped_results.append(r)
+
         candidate_items = [
             (r["pt"], float(r["score"]))
-            for r in reranked_results[:eff_limit]
+            for r in deduped_results[:eff_limit]
         ]
     else:
+        seen_identities = set()
+        deduped_pts = []
+        for pt in search_response.points:
+            p = pt.payload or {}
+            c_name = (p.get("name") or "").strip().lower()
+            c_email = (p.get("email") or "").strip().lower()
+            c_phone = (p.get("mobile_number") or "").strip()
+            ident = c_email if (c_email and c_email not in ["none", "null"]) else (c_phone if len(c_phone) >= 8 else c_name)
+            if ident and ident in seen_identities:
+                continue
+            seen_identities.add(ident)
+            deduped_pts.append(pt)
+
         candidate_items = [
             (pt, None)
-            for pt in search_response.points[:eff_limit]
+            for pt in deduped_pts[:eff_limit]
         ]
 
     # 7. Format Candidate Cards with Two-Stage Metrics
@@ -688,12 +875,16 @@ async def match_jd(
             "total_experience": payload.get("total_experience", 0.0),
             "designations": payload.get("designation", []) or [],
             "company_details": payload.get("company_details", []) or [],
+            "work_experience": payload.get("work_experience", []) or [],
             "education": payload.get("EDUCATION", []) or [],
             "degrees": payload.get("degree", []) or [],
             "matched_skills": matched_skills,
             "other_skills": other_skills[:15],
             "total_skills_count": len(candidate_skills),
             "summary": payload.get("summary", ""),
+            "gender": payload.get("gender"),
+            "age": payload.get("age"),
+            "dob": payload.get("dob"),
             "projects": payload.get("projects", []) or [],
             "certification": payload.get("certification", []) or [],
         })
@@ -704,13 +895,14 @@ async def match_jd(
         col_info = qdrant_client.get_collection(COLLECTION_NAME)
         total_db_points = col_info.points_count
     except Exception:
-        total_db_points = len(list(FLAT_JSON_DIR.glob("*.json")))
+        total_db_points = 0
 
     return {
         "success": True,
         "total_database_points": total_db_points,
         "total_matches": len(candidates),
         "experience_filter": exp_filter,
+        "additional_info": eff_additional_info if eff_additional_info else None,
         "total_time_ms": total_time_ms,
         "embed_time_ms": round(t_embed * 1000, 1),
         "search_time_ms": round(t_search * 1000, 1),
@@ -799,36 +991,21 @@ async def download_original_resume(file_name: str):
     )
 
 
-def get_next_resume_id() -> int:
-    """Finds the next available sequential counting ID from flat_json/."""
-    max_id = 0
-    if FLAT_JSON_DIR.exists():
-        for p in FLAT_JSON_DIR.glob("*.json"):
-            prefix = p.name.split("_")[0]
-            if prefix.isdigit():
-                max_id = max(max_id, int(prefix))
-    return max_id + 1
-
-
 @app.post("/api/resumes/upload")
 async def upload_and_ingest_resumes(files: List[UploadFile] = File(...)):
     """
     Upload and incrementally ingest 1 or more new resumes (PDF, DOCX, DOC, PNG, JPG, TXT):
-      1. Determines the next sequential counting ID (e.g. 591, 592...).
-      2. Saves original file into resumes/ directory.
-      3. Parses resume through ATS pipeline into extracted_text/, segmented_text/, flat_json/.
-      4. Generates 384D embedding via FastEmbed ONNX on CPU.
-      5. Incrementally upserts to Qdrant vector database (no re-indexing of old resumes).
-      6. Returns the parsed candidate profile and updated collection count.
+      1. Saves original file into resumes/ directory.
+      2. Parses resume through ATS pipeline into flat_json/.
+      3. Uses sync_resume_to_qdrant() to check identity, run Smart Diff & Merge,
+         and upsert into Qdrant collection 'resumes' (in-place if existing candidate).
+      4. Returns ingested / updated candidate records and live collection stats.
     """
     if not qdrant_client:
         raise HTTPException(status_code=503, detail="Vector database not ready")
-    if not embed_model:
-        raise HTTPException(status_code=503, detail="Embedding model not ready")
     if not files:
         raise HTTPException(status_code=400, detail="No files provided")
 
-    current_id = get_next_resume_id()
     ingested_resumes = []
     errors = []
 
@@ -837,7 +1014,6 @@ async def upload_and_ingest_resumes(files: List[UploadFile] = File(...)):
             continue
 
         filename = upload_file.filename
-        assigned_id = current_id
         t_start = time.perf_counter()
 
         try:
@@ -847,27 +1023,19 @@ async def upload_and_ingest_resumes(files: List[UploadFile] = File(...)):
             with open(dest_file, "wb") as f:
                 f.write(content)
 
-            # 2. Run ATS Parser (Layer 0 Ingestion/OCR, Layer 1 Segmentation, Layers 2-4 Assembly & Flat JSON)
+            # 2. Parse resume with pure Python ATS parser
             flat_record = process_resume(
                 file_path=str(dest_file),
-                resume_id=assigned_id,
-                output_dir=str(FLAT_JSON_DIR),
+                resume_id=0,
+                output_dir=str(BASE_DIR / "flat_json"),
                 verbose=False
             )
 
-            # 3. Build search document & embed with FastEmbed ONNX
-            search_doc = build_candidate_search_text(flat_record)
-            vector = list(embed_model.embed([search_doc]))[0].tolist()
-
-            # 4. Incremental Upsert to Qdrant
-            point = models.PointStruct(
-                id=int(assigned_id),
-                vector=vector,
-                payload=flat_record
-            )
-            qdrant_client.upsert(
-                collection_name=COLLECTION_NAME,
-                points=[point]
+            # 3. Smart Diff, Identity Resolution & In-Place Qdrant Sync
+            point_id = sync_resume_to_qdrant(
+                parsed_record=flat_record,
+                filename=filename,
+                file_bytes=content
             )
 
             t_total = time.perf_counter() - t_start
@@ -876,7 +1044,7 @@ async def upload_and_ingest_resumes(files: List[UploadFile] = File(...)):
             skills = flat_record.get("skills", []) or []
 
             ingested_resumes.append({
-                "id": assigned_id,
+                "id": point_id,
                 "name": name,
                 "file_name": filename,
                 "total_experience": exp,
@@ -885,10 +1053,9 @@ async def upload_and_ingest_resumes(files: List[UploadFile] = File(...)):
                 "skills_sample": skills[:8],
                 "email": flat_record.get("email"),
                 "mobile_number": flat_record.get("mobile_number"),
+                "update_reasons": flat_record.get("update_reasons", []),
                 "parsing_time_seconds": round(t_total, 2)
             })
-
-            current_id += 1
 
         except Exception as e:
             errors.append({"file_name": filename, "error": str(e)})
@@ -898,7 +1065,7 @@ async def upload_and_ingest_resumes(files: List[UploadFile] = File(...)):
         col_info = qdrant_client.get_collection(COLLECTION_NAME)
         total_count = col_info.points_count
     except Exception:
-        total_count = len(list(FLAT_JSON_DIR.glob("*.json")))
+        total_count = len(list((BASE_DIR / "flat_json").glob("*.json")))
 
     return {
         "success": len(ingested_resumes) > 0,

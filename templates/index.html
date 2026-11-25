@@ -60,7 +60,7 @@
         </button>
         <div class="bg-emerald-50 border border-emerald-200 text-emerald-700 font-semibold px-3 py-1.5 rounded-lg flex items-center gap-2 shadow-xs">
           <span class="w-2 h-2 rounded-full bg-emerald-500 animate-pulse"></span>
-          <span id="telemetryStatus">593 Resumes Indexed</span>
+          <span id="telemetryStatus">572 Resumes Indexed</span>
         </div>
         <a href="http://localhost:6333/dashboard#/collections/resumes" target="_blank" class="hidden sm:inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-slate-100 hover:bg-slate-200 text-slate-700 font-medium transition">
           <i class="fa-solid fa-database text-indigo-500"></i> Qdrant Dashboard
@@ -154,6 +154,18 @@ We are looking for a Senior Python Developer / Data Scientist with 3+ years expe
               <button type="button" onclick="setExpTag('5-10yr')" class="px-2 py-0.5 rounded bg-slate-100 hover:bg-slate-200 text-slate-700 font-medium transition">5-10 yrs</button>
               <button type="button" onclick="setExpTag('')" class="px-2 py-0.5 rounded bg-slate-100 hover:bg-slate-200 text-indigo-600 font-semibold transition" title="Auto-detect from JD">Auto (JD)</button>
             </div>
+          </div>
+
+          <!-- ADDITIONAL INFO / RECRUITER NOTES (OPTIONAL) -->
+          <div>
+            <div class="flex items-center justify-between text-xs font-semibold text-slate-700 mb-1.5">
+              <label for="additionalInfoInput" class="flex items-center gap-1.5">
+                <i class="fa-solid fa-file-pen text-indigo-600"></i>
+                Additional Info / Recruiter Notes (Optional):
+              </label>
+              <span class="text-[11px] text-slate-400 font-normal">Overwrites JD exp if specified</span>
+            </div>
+            <textarea id="additionalInfoInput" rows="2" placeholder="e.g. Experience 4-8 yrs, prefer female candidate, max age 32, location Delhi NCR..." class="w-full py-2 px-3 text-xs sm:text-sm border border-slate-300 rounded-xl bg-white outline-none focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 transition font-sans text-slate-800 placeholder:text-slate-400 resize-y"></textarea>
           </div>
 
           <!-- TOP K RESULTS -->
@@ -309,7 +321,7 @@ We are looking for a Senior Python Developer / Data Scientist with 3+ years expe
             <i class="fa-solid fa-file-circle-plus text-indigo-600"></i>
             Ingest New Resumes
           </h3>
-          <p class="text-xs text-slate-500 mt-0.5">Parse, number, embed and index new resumes into Qdrant & flat_json.</p>
+          <p class="text-xs text-slate-500 mt-0.5">Parse, run Smart Diff & Merge, and index into Qdrant & flat_json.</p>
         </div>
         <button onclick="closeUploadModal()" class="text-slate-400 hover:text-slate-600 text-lg font-bold px-2 py-1">&times;</button>
       </div>
@@ -335,21 +347,21 @@ We are looking for a Senior Python Developer / Data Scientist with 3+ years expe
         <!-- INGESTION PROGRESS -->
         <div id="ingestProgress" class="hidden p-4 rounded-xl bg-indigo-50 border border-indigo-200 text-center space-y-2">
           <div class="inline-block animate-spin text-indigo-600 text-xl"><i class="fa-solid fa-circle-notch"></i></div>
-          <p class="text-xs font-bold text-indigo-900" id="ingestStatusText">Parsing, extracting & embedding resumes on CPU...</p>
-          <p class="text-[11px] text-indigo-600">Assigning sequential IDs & upserting directly to Qdrant</p>
+          <p class="text-xs font-bold text-indigo-900" id="ingestStatusText">Parsing, Smart Diffing & embedding resumes on CPU...</p>
+          <p class="text-[11px] text-indigo-600">Assigning persistent Point IDs & upserting directly to Qdrant</p>
         </div>
 
         <!-- INGESTION RESULTS -->
         <div id="ingestResults" class="hidden space-y-2">
           <h4 class="text-xs font-bold text-emerald-700 flex items-center gap-1.5">
-            <i class="fa-solid fa-circle-check"></i> Ingested Successfully
+            <i class="fa-solid fa-circle-check"></i> Ingestion & Diff Complete
           </h4>
           <div id="ingestResultsList" class="max-h-48 overflow-y-auto space-y-2"></div>
         </div>
       </div>
 
       <div class="p-3 bg-slate-100 border-t border-slate-200 flex justify-between items-center">
-        <span class="text-[11px] text-slate-500" id="modalFooterInfo">Sequential counting ID will auto-increment.</span>
+        <span class="text-[11px] text-slate-500" id="modalFooterInfo">Smart Candidate Diff merges existing candidates in-place.</span>
         <div class="flex items-center gap-2">
           <button onclick="closeUploadModal()" class="px-4 py-2 rounded-lg bg-white border border-slate-300 text-xs font-semibold hover:bg-slate-50 transition">Close</button>
           <button id="startIngestBtn" onclick="submitNewResumes()" disabled class="px-4 py-2 rounded-lg bg-indigo-600 text-white text-xs font-semibold hover:bg-indigo-700 transition disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-1.5">
@@ -368,6 +380,7 @@ We are looking for a Senior Python Developer / Data Scientist with 3+ years expe
   <script>
     let currentTab = 'text';
     let lastExtractedJd = null;
+    let currentCandidates = [];
 
     function switchTab(tab) {
       currentTab = tab;
@@ -489,6 +502,7 @@ We are looking for a Senior Python Developer / Data Scientist with 3+ years expe
       }
       formData.append("limit", document.getElementById('limitSelect').value);
       formData.append("experience", document.getElementById('expTextInput').value.trim());
+      formData.append("additional_info", document.getElementById('additionalInfoInput').value.trim());
       formData.append("mandatory_skills", document.getElementById('mandatorySkillInput').value.trim());
       formData.append("enable_rerank", document.getElementById('enableRerankToggle').checked);
 
@@ -543,6 +557,10 @@ We are looking for a Senior Python Developer / Data Scientist with 3+ years expe
           expBadge.className = "px-2.5 py-0.5 rounded-full text-[11px] font-bold border bg-indigo-50 text-indigo-700 border-indigo-200 inline-flex items-center gap-1 shadow-2xs";
           expBadge.innerHTML = `<i class="fa-solid fa-wand-magic-sparkles text-[10px]"></i> Auto-detected: ${ef.label}`;
           expBadge.classList.remove('hidden');
+        } else if (ef.source === 'additional_info_override') {
+          expBadge.className = "px-2.5 py-0.5 rounded-full text-[11px] font-bold border bg-purple-50 text-purple-700 border-purple-200 inline-flex items-center gap-1 shadow-2xs";
+          expBadge.innerHTML = `<i class="fa-solid fa-file-pen text-[10px]"></i> Overridden: ${ef.label}`;
+          expBadge.classList.remove('hidden');
         } else if (ef.source === 'text_input') {
           expBadge.className = "px-2.5 py-0.5 rounded-full text-[11px] font-bold border bg-emerald-50 text-emerald-700 border-emerald-200 inline-flex items-center gap-1 shadow-2xs";
           expBadge.innerHTML = `<i class="fa-solid fa-filter text-[10px]"></i> Filter: ${ef.label}`;
@@ -570,7 +588,21 @@ We are looking for a Senior Python Developer / Data Scientist with 3+ years expe
 
       banner.classList.remove('hidden');
 
-      if (data.candidates.length === 0) {
+      currentCandidates = (data.candidates || []).map((c, idx) => ({
+        ...c,
+        rank: idx + 1,
+        original_score: c.original_score !== undefined ? c.original_score : c.match_score,
+        manual_boost: 0
+      }));
+
+      renderCandidateCards();
+    }
+
+    function renderCandidateCards() {
+      const list = document.getElementById('candidatesList');
+      list.innerHTML = "";
+
+      if (currentCandidates.length === 0) {
         list.innerHTML = `
           <div class="bg-white rounded-xl border border-slate-200 p-8 text-center text-slate-500 text-sm">
             No candidates matched the given filters. Try reducing the minimum experience or removing mandatory skill restrictions.
@@ -579,7 +611,7 @@ We are looking for a Senior Python Developer / Data Scientist with 3+ years expe
         return;
       }
 
-      data.candidates.forEach(c => {
+      currentCandidates.forEach(c => {
         const card = createCandidateCard(c);
         list.appendChild(card);
       });
@@ -663,6 +695,11 @@ We are looking for a Senior Python Developer / Data Scientist with 3+ years expe
             <span class="px-3 py-1 rounded-xl text-xs font-extrabold border shadow-xs ${scoreBadgeClass}">
               ${c.match_score}% Match
             </span>
+            ${c.manual_boost && c.manual_boost > 0 ? `
+              <span class="inline-flex items-center gap-1 text-[10px] font-bold text-amber-700 bg-amber-50 border border-amber-200 px-2 py-0.5 rounded-full mt-1">
+                <i class="fa-solid fa-bolt text-amber-500"></i> +${c.manual_boost}% Boosted
+              </span>
+            ` : ''}
             <span class="text-[10px] text-slate-400 mt-1 font-mono text-right">
               ${c.cross_encoder_score !== null ? `Cosine: ${c.raw_score} &bull; Cross-Encoder: ${c.cross_encoder_score}` : `Cosine: ${c.raw_score}`}
             </span>
@@ -675,16 +712,22 @@ We are looking for a Senior Python Developer / Data Scientist with 3+ years expe
         </div>
 
         <!-- KEY METRICS ROW -->
-        <div class="grid grid-cols-2 sm:grid-cols-3 gap-2 bg-slate-50 rounded-xl p-3 text-xs border border-slate-100">
+        <div class="grid grid-cols-2 sm:grid-cols-4 gap-2 bg-slate-50 rounded-xl p-3 text-xs border border-slate-100">
           <div>
             <span class="text-slate-400 block font-medium">Total Experience</span>
             <span class="font-bold text-slate-800">${c.total_experience > 0 ? c.total_experience + ' years' : 'Not specified'}</span>
           </div>
           <div>
+            <span class="text-slate-400 block font-medium">Demographics</span>
+            <span class="font-bold text-slate-800">
+              ${c.gender ? (c.gender === 'female' ? '<span class="text-pink-600 font-semibold">♀ Female</span>' : '<span class="text-blue-600 font-semibold">♂ Male</span>') : '<span class="text-slate-400">Not specified</span>'}${c.age ? ' <span class="text-slate-600 font-normal">(' + c.age + ' yrs)</span>' : ''}
+            </span>
+          </div>
+          <div>
             <span class="text-slate-400 block font-medium">Education</span>
             <span class="font-bold text-slate-800 truncate block">${c.degrees.length > 0 ? c.degrees.join(', ') : 'Not specified'}</span>
           </div>
-          <div class="col-span-2 sm:col-span-1">
+          <div>
             <span class="text-slate-400 block font-medium">Original File</span>
             <a href="/api/resume/${encodeURIComponent(c.file_name)}" target="_blank" class="font-bold text-indigo-600 hover:underline truncate block" title="Download Original File">
               <i class="fa-solid fa-download text-[10px]"></i> ${c.file_name}
@@ -713,7 +756,12 @@ We are looking for a Senior Python Developer / Data Scientist with 3+ years expe
 
         <!-- CARD FOOTER ACTIONS -->
         <div class="pt-2 border-t border-slate-100 flex items-center justify-between text-xs">
-          <span class="text-slate-400">Candidate ID: #${c.id}</span>
+          <div class="flex items-center gap-2">
+            <span class="text-slate-400">Candidate ID: #${c.id}</span>
+            <button onclick="promptManualBoost(${c.id}, '${(c.name || 'Candidate').replace(/'/g, "\\'")}', ${c.manual_boost || 0})" class="inline-flex items-center gap-1 text-[11px] font-semibold text-amber-700 hover:text-amber-800 bg-amber-50 hover:bg-amber-100 border border-amber-200 px-2 py-0.5 rounded-lg transition cursor-pointer">
+              <i class="fa-solid fa-bolt text-amber-500"></i> ${c.manual_boost > 0 ? `Boosted (+${c.manual_boost}%)` : '+ Add Points'}
+            </button>
+          </div>
           <button onclick="viewFullProfile(${c.id})" class="text-indigo-600 hover:text-indigo-800 font-bold flex items-center gap-1 transition">
             View Full Profile Data <i class="fa-solid fa-chevron-right text-[10px]"></i>
           </button>
@@ -737,6 +785,37 @@ We are looking for a Senior Python Developer / Data Scientist with 3+ years expe
 
     function closeModal() {
       document.getElementById('jsonModal').classList.add('hidden');
+    }
+
+    function promptManualBoost(candidateId, candidateName, currentBoost) {
+      const cand = currentCandidates.find(c => c.id === candidateId);
+      if (!cand) return;
+
+      const input = prompt(
+        `Session Score Adjustment for: ${candidateName}\n(Applies only to current JD search results)\n\nCurrent manual boost: +${cand.manual_boost || 0}%\n\nEnter points to add (e.g. 5, 10, 15) or 0 to reset:`,
+        cand.manual_boost > 0 ? cand.manual_boost : "10"
+      );
+      if (input === null) return;
+      const boostVal = parseFloat(input);
+      if (isNaN(boostVal)) {
+        alert("Please enter a valid number (e.g. 10)");
+        return;
+      }
+
+      if (boostVal <= 0) {
+        cand.manual_boost = 0;
+        cand.match_score = cand.original_score;
+        showToast(`Reset score for ${candidateName} to calculated ${cand.match_score}%`);
+      } else {
+        cand.manual_boost = boostVal;
+        cand.match_score = Math.min(99, Math.round(cand.original_score + boostVal));
+        showToast(`Temporarily boosted ${candidateName} to ${cand.match_score}% (+${boostVal}%)`);
+      }
+
+      // Re-sort current candidates by match_score descending, update ranks
+      currentCandidates.sort((a, b) => b.match_score - a.match_score);
+      currentCandidates.forEach((c, idx) => { c.rank = idx + 1; });
+      renderCandidateCards();
     }
 
     function resetSearch() {
@@ -838,7 +917,7 @@ We are looking for a Senior Python Developer / Data Scientist with 3+ years expe
       showToast("Transferred extracted text to editor!");
     }
 
-    // --- RESUME INGESTION MODAL LOGIC ---
+    // --- RESUME INGESTION & SMART DIFF LOGIC ---
     let selectedResumeFiles = [];
 
     function openUploadModal() {
@@ -932,15 +1011,21 @@ We are looking for a Senior Python Developer / Data Scientist with 3+ years expe
               <span class="text-[11px] text-emerald-700 font-semibold">${r.total_experience} yrs exp</span>
             </div>
             <p class="text-[11px] text-slate-500 truncate">${r.file_name} • ${r.skills_count} skills extracted</p>
+            ${r.update_reasons && r.update_reasons.length > 0 ? `
+              <p class="text-[10px] text-amber-700 bg-amber-50 px-2 py-0.5 rounded border border-amber-200">
+                <i class="fa-solid fa-code-compare mr-1"></i> ${r.update_reasons.join('; ')}
+              </p>
+            ` : ''}
             <div class="flex flex-wrap gap-1 mt-1">
               ${(r.skills_sample || []).slice(0, 6).map(s => `<span class="px-1.5 py-0.5 bg-white border border-slate-200 text-slate-600 rounded text-[10px]">${s}</span>`).join('')}
             </div>
           </div>
         `).join('');
 
-        showToast(`Successfully ingested ${data.ingested_count} resume(s)!`);
+        showToast(`Successfully processed ${data.ingested_count} resume(s)!`);
         selectedResumeFiles = [];
         document.getElementById('selectedFilesContainer').classList.add('hidden');
+        fetchLiveStats();
 
       } catch (err) {
         progress.classList.add('hidden');

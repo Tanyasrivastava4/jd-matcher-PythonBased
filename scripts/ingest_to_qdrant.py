@@ -24,7 +24,7 @@ from fastembed import TextEmbedding
 WORKSPACE = Path("/home/intileo/Desktop/jd-matcher")
 FLAT_JSON_DIR = WORKSPACE / "flat_json"
 COLLECTION_NAME = "resumes"
-EMBED_MODEL_NAME = "BAAI/bge-small-en-v1.5"
+EMBED_MODEL_NAME = "jinaai/jina-embeddings-v2-small-en"
 QDRANT_URL = "http://localhost:6333"
 BATCH_SIZE = 64
 
@@ -96,7 +96,7 @@ def main():
     client.recreate_collection(
         collection_name=COLLECTION_NAME,
         vectors_config=models.VectorParams(
-            size=384,
+            size=512,
             distance=models.Distance.COSINE
         )
     )
